@@ -341,32 +341,11 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 			}
 		},
 		FindProcess: func() {
-			if attemptProcessLookup {
-				attemptProcessLookup = false
-				if !features.CMFA {
-					// normal check for process
-					uid, path, err := process.FindProcessName(metadata.NetWork.String(), metadata.SrcIP, int(metadata.SrcPort))
-					if err != nil {
-						log.Debugln("[Process] find process error for %s: %v", metadata.String(), err)
-					} else {
-						metadata.Process = filepath.Base(path)
-						metadata.ProcessPath = path
-						metadata.Uid = uid
-
-						if pkg, err := process.FindPackageName(metadata); err == nil { // for android (not CMFA) package names
-							metadata.Process = pkg
-						}
-					}
-				} else {
-					// check package names
-					pkg, err := process.FindPackageName(metadata)
-					if err != nil {
-						log.Debugln("[Process] find process error for %s: %v", metadata.String(), err)
-					} else {
-						metadata.Process = pkg
-					}
-				}
+			if !attemptProcessLookup {
+				return
 			}
+			attemptProcessLookup = false
+			findProcess(metadata)
 		},
 	}
 
@@ -388,6 +367,26 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 		proxy, rule, err = match(metadata, helper)
 	}
 	return
+}
+
+func findProcess(metadata *C.Metadata) {
+	if !features.Android {
+		uid, path, err := process.FindProcessName(metadata.NetWork.String(), metadata.SrcIP, int(metadata.SrcPort))
+		if err != nil {
+			log.Debugln("[Process] find process error for %s: %v", metadata.String(), err)
+		} else {
+			metadata.Process = filepath.Base(path)
+			metadata.ProcessPath = path
+			metadata.Uid = uid
+		}
+	} else {
+		pkg, err := process.FindPackageName(metadata)
+		if err != nil {
+			log.Debugln("[Process] find process error for %s: %v", metadata.String(), err)
+		} else {
+			metadata.Process = pkg
+		}
+	}
 }
 
 // processUDP starts a loop to handle udp packet

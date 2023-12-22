@@ -105,8 +105,6 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateGeneral(cfg.General, true)
 	updateNTP(cfg.NTP)
 	updateDNS(cfg.DNS, cfg.General.IPv6)
-	updateListeners(cfg.General, cfg.Listeners, force)
-	updateTun(cfg.General) // tun should not care "force"
 	updateIPTables(cfg)
 	updateTunnels(cfg.Tunnels)
 
@@ -325,14 +323,15 @@ func loadProvider[T P.Provider](providers map[string]T) {
 		if err := pv.Initial(); err != nil {
 			switch pv.Type() {
 			case P.Proxy:
-				{
-					log.Errorln("initial proxy provider %s error: %v", name, err)
-				}
+				log.Errorln("initial proxy provider %s error: %v", name, err)
 			case P.Rule:
-				{
-					log.Errorln("initial rule provider %s error: %v", name, err)
-				}
+				log.Errorln("initial rule provider %s error: %v", name, err)
 			}
+			return
+		}
+
+		if DefaultProviderLoadedHook != nil {
+			DefaultProviderLoadedHook(name)
 		}
 	}
 

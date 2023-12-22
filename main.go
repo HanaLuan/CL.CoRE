@@ -176,7 +176,7 @@ func main() {
 		options = append(options, hub.WithSecret(secret))
 	}
 
-	if err := hub.Parse(configBytes, options...); err != nil {
+	if err := hub.ParseWithBytes(configBytes, options...); err != nil {
 		log.Fatalln("Parse config error: %s", err.Error())
 	}
 
@@ -195,7 +195,7 @@ func main() {
 		case <-termSign:
 			return
 		case <-hupSign:
-			if err := hub.Parse(configBytes, options...); err != nil {
+			if err := hub.ParseWithBytes(configBytes, options...); err != nil {
 				log.Errorln("Parse config error: %s", err.Error())
 			}
 		}
