@@ -91,6 +91,7 @@ func (c *DefaultDialerClient) markClosed() {
 func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionID string, body io.Reader, uploadOnly bool) (io.ReadCloser, net.Addr, net.Addr, error) {
 	var remoteAddr net.Addr
 	var localAddr net.Addr
+	meta := connTelemetry{}
 	var gotConn sync.Once
 	gotConnCh := make(chan struct{})
 	closeGotConn := func() { gotConn.Do(func() { close(gotConnCh) }) }
@@ -99,6 +100,12 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		GotConn: func(connInfo httptrace.GotConnInfo) {
 			remoteAddr = connInfo.Conn.RemoteAddr()
 			localAddr = connInfo.Conn.LocalAddr()
+			if localAddr != nil {
+				meta.localAddr = localAddr.String()
+			}
+			if remoteAddr != nil {
+				meta.remoteAddr = remoteAddr.String()
+			}
 			closeGotConn()
 		},
 	})
@@ -113,6 +120,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		return nil, nil, nil, err
 	}
 	c.transportConfig.FillStreamRequest(req, sessionID)
+	logRequest(c.transportConfig, "stream", req, sessionID, "", meta)
 
 	reader := &WaitReadCloser{Wait: make(chan struct{})}
 	errCh := make(chan error, 1)
@@ -131,6 +139,13 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		}
 
 		closeGotConn()
+		logResponse(c.transportConfig, "stream", resp, sessionID, "", meta)
+		if ensureErr := ensureHTTPProtocolAllowed(c.transportConfig, resp); ensureErr != nil {
+			resp.Body.Close()
+			errCh <- ensureErr
+			_ = reader.Close()
+			return
+		}
 		if resp.StatusCode != http.StatusOK || uploadOnly {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
@@ -154,17 +169,40 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 
 func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessionID string, seqStr string, payload []byte) error {
 	method := c.transportConfig.GetNormalizedUplinkHTTPMethod()
-	req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), method, url, nil)
+	var remoteAddr net.Addr
+	var localAddr net.Addr
+	meta := connTelemetry{}
+
+	traceCtx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(connInfo httptrace.GotConnInfo) {
+			remoteAddr = connInfo.Conn.RemoteAddr()
+			localAddr = connInfo.Conn.LocalAddr()
+			if localAddr != nil {
+				meta.localAddr = localAddr.String()
+			}
+			if remoteAddr != nil {
+				meta.remoteAddr = remoteAddr.String()
+			}
+		},
+	})
+
+	req, err := http.NewRequestWithContext(context.WithoutCancel(traceCtx), method, url, nil)
 	if err != nil {
 		return err
 	}
 	c.transportConfig.FillPacketRequest(req, sessionID, seqStr, payload)
+	logRequest(c.transportConfig, "packet-up", req, sessionID, seqStr, meta)
 
 	if c.httpVersion != "1.1" {
 		resp, err := c.client.Do(req)
 		if err != nil {
 			c.markClosed()
 			return err
+		}
+		logResponse(c.transportConfig, "packet-up", resp, sessionID, seqStr, meta)
+		if ensureErr := ensureHTTPProtocolAllowed(c.transportConfig, resp); ensureErr != nil {
+			resp.Body.Close()
+			return ensureErr
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		defer resp.Body.Close()

@@ -13,6 +13,7 @@ import (
 
 	"github.com/metacubex/http"
 	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/resolver"
 	ctls "github.com/metacubex/mihomo/component/tls"
 	"github.com/metacubex/mihomo/log"
 	quic "github.com/metacubex/quic-go"
@@ -371,17 +372,7 @@ func buildHTTP3Client(config *SplitHTTPConfig) *http.Client {
 		TLSClientConfig: tlsConf,
 		QUICConfig:      quicConf,
 		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-			udpAddr, err := net.ResolveUDPAddr("udp", config.DialAddr)
-			if err != nil {
-				return nil, err
-			}
-
-			var conn net.PacketConn
-			if config.H3PacketDial != nil {
-				conn, err = config.H3PacketDial(ctx, udpAddr)
-			} else {
-				conn, err = net.ListenPacket("udp", ":0")
-			}
+			udpAddrs, err := resolveH3DialUDPAddrs(ctx, config.DialAddr)
 			if err != nil {
 				return nil, err
 			}
@@ -398,15 +389,70 @@ func buildHTTP3Client(config *SplitHTTPConfig) *http.Client {
 				tlsCfg.NextProtos = []string{"h3"}
 			}
 
-			quicConn, err := quic.DialEarly(ctx, conn, udpAddr, tlsCfg, cfg)
-			if err != nil {
+			var lastErr error
+			for _, udpAddr := range udpAddrs {
+				var conn net.PacketConn
+				if config.H3PacketDial != nil {
+					conn, err = config.H3PacketDial(ctx, udpAddr)
+				} else {
+					conn, err = net.ListenPacket("udp", ":0")
+				}
+				if err != nil {
+					lastErr = err
+					continue
+				}
+
+				quicConn, dialErr := quic.DialEarly(ctx, conn, udpAddr, tlsCfg, cfg)
+				if dialErr == nil {
+					return quicConn, nil
+				}
 				_ = conn.Close()
-				return nil, err
+				lastErr = dialErr
 			}
-			return quicConn, nil
+
+			if lastErr == nil {
+				lastErr = fmt.Errorf("no reachable h3 endpoint for %s", config.DialAddr)
+			}
+			return nil, lastErr
 		},
 	}
 	return &http.Client{Transport: rt}
+}
+
+func resolveH3DialUDPAddrs(ctx context.Context, dialAddr string) ([]*net.UDPAddr, error) {
+	host, port, err := net.SplitHostPort(dialAddr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid splithttp dial addr %q: %w", dialAddr, err)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		return nil, fmt.Errorf("invalid splithttp dial addr port %q: %w", port, err)
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		return []*net.UDPAddr{{IP: ip, Port: portNum}}, nil
+	}
+
+	ips, err := resolver.LookupIPWithResolver(ctx, host, resolver.ProxyServerHostResolver)
+	if err != nil {
+		return nil, fmt.Errorf("resolve splithttp h3 host %q failed: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("resolve splithttp h3 host %q got empty result", host)
+	}
+
+	ipv4s, ipv6s := resolver.SortationAddr(ips)
+	addrs := make([]*net.UDPAddr, 0, len(ips))
+	for _, ip := range ipv6s {
+		addrs = append(addrs, &net.UDPAddr{IP: net.IP(ip.AsSlice()), Port: portNum})
+	}
+	for _, ip := range ipv4s {
+		addrs = append(addrs, &net.UDPAddr{IP: net.IP(ip.AsSlice()), Port: portNum})
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("resolve splithttp h3 host %q produced no dialable ip", host)
+	}
+	return addrs, nil
 }
 
 func StreamConnH3(ctx context.Context, config *SplitHTTPConfig) (net.Conn, error) {
