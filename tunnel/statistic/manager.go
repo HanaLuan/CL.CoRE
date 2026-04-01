@@ -85,7 +85,10 @@ func (m *Manager) PushDownloaded(lastChain string, size int64) {
 	m.downloadTotal.Add(size)
 }
 
-func (m *Manager) Now() (up int64, down int64) {
+func (m *Manager) Now(onlyProxy ...bool) (up int64, down int64) {
+	if len(onlyProxy) > 0 && onlyProxy[0] {
+		return m.proxyUploadBlip.Load(), m.proxyDownloadBlip.Load()
+	}
 	return m.uploadBlip.Load(), m.downloadBlip.Load()
 }
 
