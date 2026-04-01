@@ -1,8 +1,6 @@
 package outbound
 
 import (
-	"github.com/metacubex/mihomo/log"
-
 	"context"
 	"errors"
 	"fmt"
@@ -19,8 +17,8 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/transport/gun"
+	"github.com/metacubex/mihomo/transport/splithttp"
 	mihomoVMess "github.com/metacubex/mihomo/transport/vmess"
-	"github.com/metacubex/mihomo/transport/xhttp"
 
 	"github.com/metacubex/http"
 	vmess "github.com/metacubex/sing-vmess"
@@ -110,69 +108,19 @@ func (v *Vmess) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 		splitConfig.H3PacketDial = func(ctx context.Context, rAddr *net.UDPAddr) (net.PacketConn, error) {
 			return v.dialer.ListenPacket(ctx, "udp", "", rAddr.AddrPort())
 		}
-		splitConfig.H1UploadDial = func(ctx context.Context) (net.Conn, error) {
+		splitConfig.DialTransport = func(ctx context.Context, httpVersion string) (net.Conn, error) {
 			rawConn, dialErr := v.dialer.DialContext(ctx, "tcp", v.addr)
 			if dialErr != nil {
 				return nil, dialErr
 			}
-			uploadConn := rawConn
-			if v.option.TLS {
-				tlsOpts := mihomoVMess.TLSConfig{
-					Host:              host,
-					SkipCertVerify:    v.option.SkipCertVerify,
-					FingerPrint:       v.option.Fingerprint,
-					Certificate:       v.option.Certificate,
-					PrivateKey:        v.option.PrivateKey,
-					ClientFingerprint: v.option.ClientFingerprint,
-					Reality:           v.realityConfig,
-					NextProtos:        splitConfig.ALPN,
-				}
-				if v.option.ServerName != "" {
-					tlsOpts.Host = v.option.ServerName
-				}
-				uploadConn, dialErr = mihomoVMess.StreamTLSConn(ctx, uploadConn, &tlsOpts)
-				if dialErr != nil {
-					_ = rawConn.Close()
-					return nil, dialErr
-				}
+			uploadConn, wrapErr := v.dialSplitHTTPTransportConn(ctx, rawConn, host, httpVersion)
+			if wrapErr != nil {
+				_ = rawConn.Close()
+				return nil, wrapErr
 			}
 			return uploadConn, nil
 		}
-		attempted := []string{}
-		if splitConfig.TryQUIC && splitConfig.HasALPN("h3") {
-			attempted = append(attempted, "h3")
-			h3Conn, h3Err := xhttp.StreamConnH3(ctx, splitConfig)
-			if h3Err == nil {
-				log.Infoln("xhttp protocol-selection attempted=%v selected=h3", attempted)
-				return v.streamConnContext(ctx, h3Conn, metadata)
-			}
-			log.Warnln("xhttp protocol-selection attempted=%v selected=none fallback_reason=%v", attempted, h3Err)
-			if !splitConfig.HasTCPFallback() {
-				return nil, h3Err
-			}
-		}
-		if v.option.TLS {
-			tlsOpts := mihomoVMess.TLSConfig{
-				Host:              host,
-				SkipCertVerify:    v.option.SkipCertVerify,
-				FingerPrint:       v.option.Fingerprint,
-				Certificate:       v.option.Certificate,
-				PrivateKey:        v.option.PrivateKey,
-				ClientFingerprint: v.option.ClientFingerprint,
-				Reality:           v.realityConfig,
-				NextProtos:        splitConfig.ALPN,
-			}
-			if v.option.ServerName != "" {
-				tlsOpts.Host = v.option.ServerName
-			}
-			c, err = mihomoVMess.StreamTLSConn(ctx, c, &tlsOpts)
-			if err != nil {
-				return nil, err
-			}
-		}
-		attempted = append(attempted, "tcp")
-		log.Infoln("xhttp protocol-selection attempted=%v selected=tcp", attempted)
-		c, err = xhttp.StreamConn(ctx, c, splitConfig)
+		c, err = splithttp.DialContext(ctx, splitConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -368,6 +316,29 @@ func (v *Vmess) streamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 	return
 }
 
+func (v *Vmess) dialSplitHTTPTransportConn(ctx context.Context, conn net.Conn, host string, httpVersion string) (net.Conn, error) {
+	if !v.option.TLS {
+		return conn, nil
+	}
+	tlsOpts := mihomoVMess.TLSConfig{
+		Host:              host,
+		SkipCertVerify:    v.option.SkipCertVerify,
+		FingerPrint:       v.option.Fingerprint,
+		Certificate:       v.option.Certificate,
+		PrivateKey:        v.option.PrivateKey,
+		ClientFingerprint: v.option.ClientFingerprint,
+		Reality:           v.realityConfig,
+		NextProtos:        []string{"http/1.1"},
+	}
+	if httpVersion == "2" {
+		tlsOpts.NextProtos = []string{"h2"}
+	}
+	if v.option.ServerName != "" {
+		tlsOpts.Host = v.option.ServerName
+	}
+	return mihomoVMess.StreamTLSConn(ctx, conn, &tlsOpts)
+}
+
 func (v *Vmess) dialContext(ctx context.Context) (c net.Conn, err error) {
 	switch v.option.Network {
 	case "grpc": // gun transport
@@ -379,6 +350,14 @@ func (v *Vmess) dialContext(ctx context.Context) (c net.Conn, err error) {
 
 // DialContext implements C.ProxyAdapter
 func (v *Vmess) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
+	if v.option.Network == "xhttp" || v.option.Network == "splithttp" {
+		c, err := v.StreamConnContext(ctx, nil, metadata)
+		if err != nil {
+			return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
+		}
+		return NewConn(c, v), nil
+	}
+
 	c, err := v.dialContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
@@ -398,6 +377,17 @@ func (v *Vmess) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn
 func (v *Vmess) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
 	if err = v.ResolveUDP(ctx, metadata); err != nil {
 		return nil, err
+	}
+
+	if v.option.Network == "xhttp" || v.option.Network == "splithttp" {
+		c, err := v.StreamConnContext(ctx, nil, metadata)
+		if err != nil {
+			return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
+		}
+		if pc, ok := c.(net.PacketConn); ok {
+			return newPacketConn(N.NewThreadSafePacketConn(pc), v), nil
+		}
+		return newPacketConn(&vmessPacketConn{Conn: c, rAddr: metadata.UDPAddr()}, v), nil
 	}
 
 	c, err := v.dialContext(ctx)

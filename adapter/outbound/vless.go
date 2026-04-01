@@ -1,8 +1,6 @@
 package outbound
 
 import (
-	"github.com/metacubex/mihomo/log"
-
 	"context"
 	"fmt"
 	"net"
@@ -16,10 +14,10 @@ import (
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/gun"
+	"github.com/metacubex/mihomo/transport/splithttp"
 	"github.com/metacubex/mihomo/transport/vless"
 	"github.com/metacubex/mihomo/transport/vless/encryption"
 	"github.com/metacubex/mihomo/transport/vmess"
-	"github.com/metacubex/mihomo/transport/xhttp"
 
 	"github.com/metacubex/http"
 	vmessSing "github.com/metacubex/sing-vmess"
@@ -83,38 +81,19 @@ func (v *Vless) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 		splitConfig.H3PacketDial = func(ctx context.Context, rAddr *net.UDPAddr) (net.PacketConn, error) {
 			return v.dialer.ListenPacket(ctx, "udp", "", rAddr.AddrPort())
 		}
-		splitConfig.H1UploadDial = func(ctx context.Context) (net.Conn, error) {
+		splitConfig.DialTransport = func(ctx context.Context, httpVersion string) (net.Conn, error) {
 			rawConn, dialErr := v.dialer.DialContext(ctx, "tcp", v.addr)
 			if dialErr != nil {
 				return nil, dialErr
 			}
-			uploadConn, wrapErr := v.streamTLSConn(ctx, rawConn, false)
+			uploadConn, wrapErr := v.dialSplitHTTPTransportConn(ctx, rawConn, httpVersion)
 			if wrapErr != nil {
 				_ = rawConn.Close()
 				return nil, wrapErr
 			}
 			return uploadConn, nil
 		}
-		attempted := []string{}
-		if splitConfig.TryQUIC && splitConfig.HasALPN("h3") {
-			attempted = append(attempted, "h3")
-			h3Conn, h3Err := xhttp.StreamConnH3(ctx, splitConfig)
-			if h3Err == nil {
-				log.Infoln("xhttp protocol-selection attempted=%v selected=h3", attempted)
-				return v.streamConnContext(ctx, h3Conn, metadata)
-			}
-			log.Warnln("xhttp protocol-selection attempted=%v selected=none fallback_reason=%v", attempted, h3Err)
-			if !splitConfig.HasTCPFallback() {
-				return nil, h3Err
-			}
-		}
-		c, err = v.streamTLSConn(ctx, c, splitConfig.HasALPN("h2"))
-		if err != nil {
-			return nil, err
-		}
-		attempted = append(attempted, "tcp")
-		log.Infoln("xhttp protocol-selection attempted=%v selected=tcp", attempted)
-		c, err = xhttp.StreamConn(ctx, c, splitConfig)
+		c, err = splithttp.DialContext(ctx, splitConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -276,6 +255,35 @@ func (v *Vless) streamTLSConn(ctx context.Context, conn net.Conn, isH2 bool) (ne
 	return conn, nil
 }
 
+func (v *Vless) dialSplitHTTPTransportConn(ctx context.Context, conn net.Conn, httpVersion string) (net.Conn, error) {
+	switch httpVersion {
+	case "2":
+		return v.streamTLSConn(ctx, conn, true)
+	case "1.1":
+		if !v.option.TLS {
+			return conn, nil
+		}
+		host, _, _ := net.SplitHostPort(v.addr)
+		tlsOpts := vmess.TLSConfig{
+			Host:              host,
+			SkipCertVerify:    v.option.SkipCertVerify,
+			FingerPrint:       v.option.Fingerprint,
+			Certificate:       v.option.Certificate,
+			PrivateKey:        v.option.PrivateKey,
+			ClientFingerprint: v.option.ClientFingerprint,
+			ECH:               v.echConfig,
+			Reality:           v.realityConfig,
+			NextProtos:        []string{"http/1.1"},
+		}
+		if v.option.ServerName != "" {
+			tlsOpts.Host = v.option.ServerName
+		}
+		return vmess.StreamTLSConn(ctx, conn, &tlsOpts)
+	default:
+		return v.streamTLSConn(ctx, conn, false)
+	}
+}
+
 func (v *Vless) dialContext(ctx context.Context) (c net.Conn, err error) {
 	switch v.option.Network {
 	case "grpc": // gun transport
@@ -287,6 +295,14 @@ func (v *Vless) dialContext(ctx context.Context) (c net.Conn, err error) {
 
 // DialContext implements C.ProxyAdapter
 func (v *Vless) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
+	if v.option.Network == "xhttp" || v.option.Network == "splithttp" {
+		c, err := v.StreamConnContext(ctx, nil, metadata)
+		if err != nil {
+			return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
+		}
+		return NewConn(c, v), nil
+	}
+
 	c, err := v.dialContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
@@ -306,6 +322,30 @@ func (v *Vless) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn
 func (v *Vless) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
 	if err = v.ResolveUDP(ctx, metadata); err != nil {
 		return nil, err
+	}
+
+	if v.option.Network == "xhttp" || v.option.Network == "splithttp" {
+		c, err := v.StreamConnContext(ctx, nil, metadata)
+		if err != nil {
+			return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
+		}
+		if v.option.XUDP {
+			var globalID [8]byte
+			if metadata.SourceValid() {
+				globalID = utils.GlobalID(metadata.SourceAddress())
+			}
+			return newPacketConn(N.NewThreadSafePacketConn(
+				vmessSing.NewXUDPConn(c,
+					globalID,
+					M.SocksaddrFromNet(metadata.UDPAddr())),
+			), v), nil
+		} else if v.option.PacketAddr {
+			return newPacketConn(N.NewThreadSafePacketConn(
+				packetaddr.NewConn(v.client.PacketConn(c, metadata.UDPAddr()),
+					M.SocksaddrFromNet(metadata.UDPAddr())),
+			), v), nil
+		}
+		return newPacketConn(N.NewThreadSafePacketConn(v.client.PacketConn(c, metadata.UDPAddr())), v), nil
 	}
 
 	c, err := v.dialContext(ctx)

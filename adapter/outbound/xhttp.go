@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -9,7 +10,7 @@ import (
 	"github.com/metacubex/http"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/log"
-	"github.com/metacubex/mihomo/transport/xhttp"
+	"github.com/metacubex/mihomo/transport/splithttp"
 )
 
 type SplitHTTPOptions struct {
@@ -52,7 +53,7 @@ func normalizeSplitHTTPDialAddr(ctx context.Context, addr string) string {
 	return net.JoinHostPort(ip.String(), port)
 }
 func decideXHTTPALPN(alpn []string) []string {
-	log.Infoln("decideXHTTPALPN received: %v", alpn)
+	log.Debugln("decideXHTTPALPN received: %v", alpn)
 	if len(alpn) == 0 {
 		return []string{"h2"}
 	}
@@ -69,19 +70,23 @@ func decideXHTTPALPN(alpn []string) []string {
 	return res
 }
 
-func buildSplitHTTPConfig(ctx context.Context, addr string, tlsServerName string, alpn []string, xhttpOpts SplitHTTPOptions, splitHTTPOpts SplitHTTPOptions, tlsEnabled bool) *xhttp.SplitHTTPConfig {
+func buildSplitHTTPClientKey(dialAddr, tlsServerName, host string, alpn []string, tlsEnabled bool) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%t", dialAddr, tlsServerName, host, strings.Join(alpn, ","), tlsEnabled)
+}
+
+func buildSplitHTTPConfig(ctx context.Context, addr string, tlsServerName string, alpn []string, xhttpOpts SplitHTTPOptions, splitHTTPOpts SplitHTTPOptions, tlsEnabled bool) *splithttp.SplitHTTPConfig {
 	host, _, _ := net.SplitHostPort(addr)
 	requestLog := xhttpOpts.RequestLog || splitHTTPOpts.RequestLog
 	if os.Getenv("MIHOMO_XHTTP_DEBUG") == "1" {
 		requestLog = true
 	}
-	tryQuic := false
+	tryQuic := true
 	if xhttpOpts.TryQUIC != nil {
 		tryQuic = *xhttpOpts.TryQUIC
 	} else if splitHTTPOpts.TryQUIC != nil {
 		tryQuic = *splitHTTPOpts.TryQUIC
 	}
-	config := &xhttp.SplitHTTPConfig{
+	config := &splithttp.SplitHTTPConfig{
 		Host:                xhttpOpts.Host,
 		Path:                xhttpOpts.Path,
 		ALPN:                decideXHTTPALPN(alpn),
@@ -108,7 +113,7 @@ func buildSplitHTTPConfig(ctx context.Context, addr string, tlsServerName string
 		TryQUIC:             tryQuic,
 	}
 	if xhttpOpts.XPaddingBytesTo > 0 {
-		config.XPaddingBytes = &xhttp.RangeConfig{From: xhttpOpts.XPaddingBytesFrom, To: xhttpOpts.XPaddingBytesTo}
+		config.XPaddingBytes = &splithttp.RangeConfig{From: xhttpOpts.XPaddingBytesFrom, To: xhttpOpts.XPaddingBytesTo}
 	}
 
 	if config.Host == "" {
@@ -131,7 +136,7 @@ func buildSplitHTTPConfig(ctx context.Context, addr string, tlsServerName string
 		config.Mode = splitHTTPOpts.Mode
 	}
 	if splitHTTPOpts.XPaddingBytesTo > 0 {
-		config.XPaddingBytes = &xhttp.RangeConfig{From: splitHTTPOpts.XPaddingBytesFrom, To: splitHTTPOpts.XPaddingBytesTo}
+		config.XPaddingBytes = &splithttp.RangeConfig{From: splitHTTPOpts.XPaddingBytesFrom, To: splitHTTPOpts.XPaddingBytesTo}
 	}
 	if splitHTTPOpts.XPaddingObfsMode {
 		config.XPaddingObfsMode = true
@@ -179,6 +184,7 @@ func buildSplitHTTPConfig(ctx context.Context, addr string, tlsServerName string
 	for k, v := range splitHTTPOpts.Headers {
 		config.Headers.Set(k, v)
 	}
+	config.ClientKey = buildSplitHTTPClientKey(config.DialAddr, config.TLSServerName, config.Host, config.ALPN, config.TLS)
 
 	return config
 }

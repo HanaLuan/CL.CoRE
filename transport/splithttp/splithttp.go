@@ -1,4 +1,4 @@
-package xhttp
+package splithttp
 
 import (
 	"bytes"
@@ -31,12 +31,15 @@ func appendToPath(path string, sessionId string) string {
 }
 
 func getBaseRequest(ctx context.Context, method, urlStr string, body io.Reader, config *SplitHTTPConfig) (*http.Request, error) {
-	// Keep SplitHTTP request lifecycle independent from outer dial context cancellation.
-	req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), method, urlStr, body)
+	req, err := http.NewRequestWithContext(ctx, method, urlStr, body)
 	if err != nil {
 		return nil, err
 	}
 	return req, nil
+}
+
+func newConnContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.WithoutCancel(ctx))
 }
 
 type Conn struct {
@@ -44,16 +47,18 @@ type Conn struct {
 	reader io.ReadCloser
 	writer io.WriteCloser
 	debug  bool
+	cancel context.CancelFunc
 	rOnce  sync.Once
 	wOnce  sync.Once
 }
 
-func NewConn(base net.Conn, reader io.ReadCloser, writer io.WriteCloser, debug bool) *Conn {
+func NewConn(base net.Conn, reader io.ReadCloser, writer io.WriteCloser, debug bool, cancel context.CancelFunc) *Conn {
 	return &Conn{
 		Conn:   base,
 		reader: reader,
 		writer: writer,
 		debug:  debug,
+		cancel: cancel,
 	}
 }
 
@@ -85,6 +90,9 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 
 func (c *Conn) Close() error {
 	var errs []error
+	if c.cancel != nil {
+		c.cancel()
+	}
 	if c.reader != nil {
 		if err := c.reader.Close(); err != nil {
 			errs = append(errs, err)
@@ -271,7 +279,7 @@ func (w *PacketUpWriter) Write(b []byte) (int, error) {
 			uploadConn = w.uploadRawPool.Get()
 			newConnection := uploadConn == nil
 			if newConnection {
-				newConn, err := w.dialUploadConn(context.WithoutCancel(w.ctx))
+				newConn, err := w.dialUploadConn(w.ctx)
 				if err != nil {
 					return 0, err
 				}
@@ -402,6 +410,14 @@ func buildHTTP3Client(config *SplitHTTPConfig) *http.Client {
 }
 
 func StreamConnH3(ctx context.Context, config *SplitHTTPConfig) (net.Conn, error) {
+	connCtx, cancel := newConnContext(ctx)
+	release := true
+	defer func() {
+		if release {
+			cancel()
+		}
+	}()
+
 	mode := parseMode(config)
 	sessionId := ""
 	if mode != "stream-one" {
@@ -413,7 +429,7 @@ func StreamConnH3(ctx context.Context, config *SplitHTTPConfig) (net.Conn, error
 
 	if mode == "stream-one" {
 		pr, pw := io.Pipe()
-		req, err := getBaseRequest(ctx, config.GetNormalizedUplinkHTTPMethod(), url, pr, config)
+		req, err := getBaseRequest(connCtx, config.GetNormalizedUplinkHTTPMethod(), url, pr, config)
 		if err != nil {
 			return nil, fmt.Errorf("create req failed: %w", err)
 		}
@@ -430,10 +446,11 @@ func StreamConnH3(ctx context.Context, config *SplitHTTPConfig) (net.Conn, error
 			b, _ := io.ReadAll(resp.Body)
 			return nil, fmt.Errorf("splithttp h3 stream-one bad status code: %d, body: %s", resp.StatusCode, string(b))
 		}
-		return NewConn(noopNetConn{}, resp.Body, pw, config.RequestLog), nil
+		release = false
+		return NewConn(noopNetConn{}, resp.Body, pw, config.RequestLog, cancel), nil
 	}
 
-	downReq, err := getBaseRequest(ctx, "GET", url, nil, config)
+	downReq, err := getBaseRequest(connCtx, "GET", url, nil, config)
 	if err != nil {
 		return nil, fmt.Errorf("create stream-down req failed: %w", err)
 	}
@@ -468,7 +485,7 @@ func StreamConnH3(ctx context.Context, config *SplitHTTPConfig) (net.Conn, error
 
 	if mode == "stream-up" {
 		upReader, upWriter := io.Pipe()
-		upReq, err := getBaseRequest(ctx, config.GetNormalizedUplinkHTTPMethod(), url, upReader, config)
+		upReq, err := getBaseRequest(connCtx, config.GetNormalizedUplinkHTTPMethod(), url, upReader, config)
 		if err != nil {
 			return nil, fmt.Errorf("create stream-up req failed: %w", err)
 		}
@@ -481,19 +498,21 @@ func StreamConnH3(ctx context.Context, config *SplitHTTPConfig) (net.Conn, error
 				resp.Body.Close()
 			}
 		}()
-		return NewConn(noopNetConn{}, downstreamReader, upWriter, config.RequestLog), nil
+		release = false
+		return NewConn(noopNetConn{}, downstreamReader, upWriter, config.RequestLog, cancel), nil
 	}
 
 	if mode == "packet-up" {
 		writer := &PacketUpWriter{
-			ctx:       ctx,
+			ctx:       connCtx,
 			client:    client,
 			url:       url,
 			config:    config,
 			sessionId: sessionId,
 			meta:      connMeta,
 		}
-		return NewConn(noopNetConn{}, downstreamReader, writer, config.RequestLog), nil
+		release = false
+		return NewConn(noopNetConn{}, downstreamReader, writer, config.RequestLog, cancel), nil
 	}
 
 	return nil, fmt.Errorf("unsupported splithttp mode %s", mode)
@@ -501,6 +520,14 @@ func StreamConnH3(ctx context.Context, config *SplitHTTPConfig) (net.Conn, error
 
 // StreamConn builds either Stream-One, Stream-Up/Down, or Packet-Up multiplexed flow based on configs.
 func StreamConn(ctx context.Context, c net.Conn, config *SplitHTTPConfig) (net.Conn, error) {
+	connCtx, cancel := newConnContext(ctx)
+	release := true
+	defer func() {
+		if release {
+			cancel()
+		}
+	}()
+
 	mode := parseMode(config)
 
 	sessionId := ""
@@ -572,7 +599,7 @@ func StreamConn(ctx context.Context, c net.Conn, config *SplitHTTPConfig) (net.C
 	if mode == "stream-one" {
 		pr, pw := io.Pipe()
 
-		req, err := getBaseRequest(ctx, config.GetNormalizedUplinkHTTPMethod(), url, pr, config)
+		req, err := getBaseRequest(connCtx, config.GetNormalizedUplinkHTTPMethod(), url, pr, config)
 		if err != nil {
 			return nil, fmt.Errorf("create req failed: %w", err)
 		}
@@ -611,10 +638,11 @@ func StreamConn(ctx context.Context, c net.Conn, config *SplitHTTPConfig) (net.C
 			reader.Set(resp.Body)
 		}()
 
-		return NewConn(c, reader, pw, config.RequestLog), nil
+		release = false
+		return NewConn(c, reader, pw, config.RequestLog, cancel), nil
 	} else {
 		// Both stream-up and packet-up use a long-lived GET request for downloads.
-		downReq, err := getBaseRequest(ctx, "GET", url, nil, config)
+		downReq, err := getBaseRequest(connCtx, "GET", url, nil, config)
 		if err != nil {
 			return nil, fmt.Errorf("create stream-down req failed: %w", err)
 		}
@@ -648,7 +676,7 @@ func StreamConn(ctx context.Context, c net.Conn, config *SplitHTTPConfig) (net.C
 
 		if mode == "stream-up" {
 			upReader, upWriter := io.Pipe()
-			upReq, err := getBaseRequest(ctx, config.GetNormalizedUplinkHTTPMethod(), url, upReader, config)
+			upReq, err := getBaseRequest(connCtx, config.GetNormalizedUplinkHTTPMethod(), url, upReader, config)
 			if err != nil {
 				return nil, fmt.Errorf("create stream-up req failed: %w", err)
 			}
@@ -663,10 +691,11 @@ func StreamConn(ctx context.Context, c net.Conn, config *SplitHTTPConfig) (net.C
 				}
 			}()
 
-			return NewConn(c, downstreamReader, upWriter, config.RequestLog), nil
+			release = false
+			return NewConn(c, downstreamReader, upWriter, config.RequestLog, cancel), nil
 		} else if mode == "packet-up" {
 			writer := &PacketUpWriter{
-				ctx:       ctx,
+				ctx:       connCtx,
 				client:    uploadClient,
 				url:       url,
 				config:    config,
@@ -678,7 +707,8 @@ func StreamConn(ctx context.Context, c net.Conn, config *SplitHTTPConfig) (net.C
 				writer.uploadRawPool = &sync.Pool{}
 				writer.dialUploadConn = config.H1UploadDial
 			}
-			return NewConn(c, downstreamReader, writer, config.RequestLog), nil
+			release = false
+			return NewConn(c, downstreamReader, writer, config.RequestLog, cancel), nil
 		}
 	}
 

@@ -1,8 +1,6 @@
 package outbound
 
 import (
-	"github.com/metacubex/mihomo/log"
-
 	"context"
 	"errors"
 	"fmt"
@@ -16,9 +14,9 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/gun"
 	"github.com/metacubex/mihomo/transport/shadowsocks/core"
+	"github.com/metacubex/mihomo/transport/splithttp"
 	"github.com/metacubex/mihomo/transport/trojan"
 	"github.com/metacubex/mihomo/transport/vmess"
-	"github.com/metacubex/mihomo/transport/xhttp"
 
 	"github.com/metacubex/http"
 	"github.com/metacubex/tls"
@@ -76,63 +74,19 @@ func (t *Trojan) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.
 		splitConfig.H3PacketDial = func(ctx context.Context, rAddr *net.UDPAddr) (net.PacketConn, error) {
 			return t.dialer.ListenPacket(ctx, "udp", "", rAddr.AddrPort())
 		}
-		attempted := []string{}
-		if splitConfig.TryQUIC && splitConfig.HasALPN("h3") {
-			attempted = append(attempted, "h3")
-			h3Conn, h3Err := xhttp.StreamConnH3(ctx, splitConfig)
-			if h3Err == nil {
-				log.Infoln("xhttp protocol-selection attempted=%v selected=h3", attempted)
-				return t.streamConnContext(ctx, h3Conn, metadata)
-			}
-			log.Warnln("xhttp protocol-selection attempted=%v selected=none fallback_reason=%v", attempted, h3Err)
-			if !splitConfig.HasTCPFallback() {
-				return nil, h3Err
-			}
-		}
-		alpn := trojan.DefaultALPN
-		if t.option.ALPN != nil {
-			alpn = t.option.ALPN
-		}
-		splitConfig.H1UploadDial = func(ctx context.Context) (net.Conn, error) {
+		splitConfig.DialTransport = func(ctx context.Context, httpVersion string) (net.Conn, error) {
 			rawConn, dialErr := t.dialer.DialContext(ctx, "tcp", t.addr)
 			if dialErr != nil {
 				return nil, dialErr
 			}
-			uploadConn := rawConn
-			uploadConn, dialErr = vmess.StreamTLSConn(ctx, uploadConn, &vmess.TLSConfig{
-				Host:              t.option.SNI,
-				SkipCertVerify:    t.option.SkipCertVerify,
-				FingerPrint:       t.option.Fingerprint,
-				Certificate:       t.option.Certificate,
-				PrivateKey:        t.option.PrivateKey,
-				ClientFingerprint: t.option.ClientFingerprint,
-				NextProtos:        alpn,
-				ECH:               t.echConfig,
-				Reality:           t.realityConfig,
-			})
-			if dialErr != nil {
+			uploadConn, wrapErr := t.dialSplitHTTPTransportConn(ctx, rawConn, httpVersion)
+			if wrapErr != nil {
 				_ = rawConn.Close()
-				return nil, dialErr
+				return nil, wrapErr
 			}
 			return uploadConn, nil
 		}
-		c, err = vmess.StreamTLSConn(ctx, c, &vmess.TLSConfig{
-			Host:              t.option.SNI,
-			SkipCertVerify:    t.option.SkipCertVerify,
-			FingerPrint:       t.option.Fingerprint,
-			Certificate:       t.option.Certificate,
-			PrivateKey:        t.option.PrivateKey,
-			ClientFingerprint: t.option.ClientFingerprint,
-			NextProtos:        alpn,
-			ECH:               t.echConfig,
-			Reality:           t.realityConfig,
-		})
-		if err != nil {
-			return nil, err
-		}
-		attempted = append(attempted, "tcp")
-		log.Infoln("xhttp protocol-selection attempted=%v selected=tcp", attempted)
-		c, err = xhttp.StreamConn(ctx, c, splitConfig)
+		c, err = splithttp.DialContext(ctx, splitConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -230,6 +184,29 @@ func (t *Trojan) streamConnContext(ctx context.Context, c net.Conn, metadata *C.
 	return c, err
 }
 
+func (t *Trojan) dialSplitHTTPTransportConn(ctx context.Context, conn net.Conn, httpVersion string) (net.Conn, error) {
+	alpn := trojan.DefaultALPN
+	if t.option.ALPN != nil {
+		alpn = t.option.ALPN
+	}
+	if httpVersion == "2" {
+		alpn = []string{"h2"}
+	} else if httpVersion == "1.1" {
+		alpn = []string{"http/1.1"}
+	}
+	return vmess.StreamTLSConn(ctx, conn, &vmess.TLSConfig{
+		Host:              t.option.SNI,
+		SkipCertVerify:    t.option.SkipCertVerify,
+		FingerPrint:       t.option.Fingerprint,
+		Certificate:       t.option.Certificate,
+		PrivateKey:        t.option.PrivateKey,
+		ClientFingerprint: t.option.ClientFingerprint,
+		NextProtos:        alpn,
+		ECH:               t.echConfig,
+		Reality:           t.realityConfig,
+	})
+}
+
 func (t *Trojan) writeHeaderContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (err error) {
 	if ctx.Done() != nil {
 		done := N.SetupContextForConn(ctx, c)
@@ -254,6 +231,14 @@ func (t *Trojan) dialContext(ctx context.Context) (c net.Conn, err error) {
 
 // DialContext implements C.ProxyAdapter
 func (t *Trojan) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
+	if t.option.Network == "xhttp" || t.option.Network == "splithttp" {
+		c, err := t.StreamConnContext(ctx, nil, metadata)
+		if err != nil {
+			return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
+		}
+		return NewConn(c, t), nil
+	}
+
 	c, err := t.dialContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
@@ -274,6 +259,14 @@ func (t *Trojan) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Con
 func (t *Trojan) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
 	if err = t.ResolveUDP(ctx, metadata); err != nil {
 		return nil, err
+	}
+
+	if t.option.Network == "xhttp" || t.option.Network == "splithttp" {
+		c, err := t.StreamConnContext(ctx, nil, metadata)
+		if err != nil {
+			return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
+		}
+		return newPacketConn(trojan.NewPacketConn(c), t), nil
 	}
 
 	c, err := t.dialContext(ctx)

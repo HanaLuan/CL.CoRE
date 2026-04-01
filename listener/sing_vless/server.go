@@ -15,9 +15,9 @@ import (
 	"github.com/metacubex/mihomo/listener/sing"
 	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/transport/gun"
+	"github.com/metacubex/mihomo/transport/splithttp"
 	"github.com/metacubex/mihomo/transport/vless/encryption"
 	mihomoVMess "github.com/metacubex/mihomo/transport/vmess"
-	"github.com/metacubex/mihomo/transport/xhttp"
 
 	"github.com/metacubex/http"
 	"github.com/metacubex/http/h2c"
@@ -156,13 +156,13 @@ func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 		}
 	}
 	if config.XHTTPConfig.Path != "" || config.XHTTPConfig.Host != "" || config.XHTTPConfig.Mode != "" {
-		importSplithttpConfig := &xhttp.SplitHTTPConfig{
+		importSplithttpConfig := &splithttp.SplitHTTPConfig{
 			Path:               config.XHTTPConfig.Path,
 			Host:               config.XHTTPConfig.Host,
 			MaxConcurrentPosts: 100,
 		}
 		xhttpPath := importSplithttpConfig.GetNormalizedPath()
-		splithttpServer := xhttp.NewSplitHTTPServer(importSplithttpConfig, func(conn net.Conn) {
+		splithttpServer := splithttp.NewSplitHTTPServer(importSplithttpConfig, func(conn net.Conn) {
 			sl.HandleConn(conn, tunnel, additions...)
 		})
 

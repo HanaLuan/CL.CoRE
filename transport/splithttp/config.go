@@ -1,4 +1,4 @@
-package xhttp
+package splithttp
 
 import (
 	"bytes"
@@ -39,7 +39,9 @@ type SplitHTTPConfig struct {
 	Host               string
 	Path               string
 	ALPN               []string
+	ClientKey          string
 	DialAddr           string
+	DialTransport      func(ctx context.Context, httpVersion string) (net.Conn, error)
 	H3PacketDial       func(ctx context.Context, rAddr *net.UDPAddr) (net.PacketConn, error)
 	H1UploadDial       func(ctx context.Context) (net.Conn, error)
 	TLSServerName      string
