@@ -12,6 +12,40 @@ import (
 	"github.com/metacubex/http"
 )
 
+func applyStreamingResponseHeaders(header http.Header, noSSEHeader bool) {
+	header.Set("X-Accel-Buffering", "no")
+	header.Set("Cache-Control", "no-store")
+	if noSSEHeader {
+		header.Set("Content-Type", "application/grpc")
+		return
+	}
+	header.Set("Content-Type", "text/event-stream")
+}
+
+func startStreamUpKeepalive(config *SplitHTTPConfig, request *http.Request, writer io.Writer) {
+	if request == nil || writer == nil || request.Header.Get("Referer") == "" {
+		return
+	}
+
+	interval := config.GetNormalizedScStreamUpServerSecs()
+	if interval.To <= 0 {
+		return
+	}
+
+	go func() {
+		for {
+			padding := generatePadding(PaddingMethodRepeatX, randInRange(config.GetNormalizedXPaddingBytes()))
+			if padding == "" {
+				return
+			}
+			if _, err := writer.Write([]byte(padding)); err != nil {
+				return
+			}
+			time.Sleep(time.Duration(randInRange(interval)) * time.Second)
+		}
+	}()
+}
+
 type SplitHTTPServer struct {
 	config    *SplitHTTPConfig
 	sessionMu sync.Mutex
@@ -84,8 +118,6 @@ func (h *SplitHTTPServer) ServeHTTP(writer http.ResponseWriter, request *http.Re
 		return
 	}
 
-	header := writer.Header()
-	header.Set("Content-Type", "application/grpc") // basic emulation
 	if paddingAuth := request.Header.Get("X-Padding"); paddingAuth != "" {
 		// skip complex padding, just flush
 	}
@@ -122,6 +154,7 @@ func (h *SplitHTTPServer) ServeHTTP(writer http.ResponseWriter, request *http.Re
 			return
 		}
 
+		writer.Header().Set("Content-Type", "application/grpc")
 		writer.WriteHeader(http.StatusOK)
 		return
 	}
@@ -147,6 +180,13 @@ func (h *SplitHTTPServer) ServeHTTP(writer http.ResponseWriter, request *http.Re
 			defer h.sessions.Delete(sessionId)
 		}
 
+		if mode == "stream-one" {
+			writer.Header().Set("X-Accel-Buffering", "no")
+			writer.Header().Set("Cache-Control", "no-store")
+			writer.Header().Set("Content-Type", "application/grpc")
+		} else {
+			applyStreamingResponseHeaders(writer.Header(), config.NoSSEHeader)
+		}
 		writer.WriteHeader(http.StatusOK)
 		if flusher, ok := writer.(http.Flusher); ok {
 			flusher.Flush()
@@ -165,6 +205,8 @@ func (h *SplitHTTPServer) ServeHTTP(writer http.ResponseWriter, request *http.Re
 		}
 		if currentSession != nil { // if not stream-one
 			conn.reader = currentSession.uploadQueue
+		} else {
+			startStreamUpKeepalive(config, request, httpSC)
 		}
 
 		h.addConn(conn)

@@ -80,33 +80,35 @@ func (h *uploadQueue) Close() error {
 }
 
 func (h *uploadQueue) Read(b []byte) (int, error) {
-	if h.reader != nil {
-		return h.reader.Read(b)
-	}
-
-	if h.closed {
-		return 0, io.EOF
-	}
-
-	if len(h.heap) == 0 {
-		packet, more := <-h.pushedPackets
-		if !more {
-			return 0, io.EOF
-		}
-		if packet.Reader != nil {
-			h.reader = packet.Reader
+	for {
+		if h.reader != nil {
 			return h.reader.Read(b)
 		}
-		heap.Push(&h.heap, packet)
-	}
 
-	for len(h.heap) > 0 {
+		if h.closed {
+			return 0, io.EOF
+		}
+
+		if len(h.heap) == 0 {
+			packet, more := <-h.pushedPackets
+			if !more {
+				return 0, io.EOF
+			}
+			if packet.Reader != nil {
+				h.reader = packet.Reader
+				return h.reader.Read(b)
+			}
+			heap.Push(&h.heap, packet)
+		}
+
 		packet := heap.Pop(&h.heap).(Packet)
-		n := 0
+		if packet.Seq < h.nextSeq {
+			continue
+		}
 
 		if packet.Seq == h.nextSeq {
-			copy(b, packet.Payload)
-			n = miMin(len(b), len(packet.Payload))
+			n := miMin(len(b), len(packet.Payload))
+			copy(b, packet.Payload[:n])
 
 			if n < len(packet.Payload) {
 				// partial read
@@ -120,23 +122,19 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 		}
 
 		// misordered packet
-		if packet.Seq > h.nextSeq {
-			if len(h.heap) > h.maxPackets {
-				// the "reassembly buffer" is too large, and we want to
-				// constrain memory usage somehow. let's tear down the
-				// connection, and hope the application retries.
-				return 0, errors.New("closed")
-			}
-			heap.Push(&h.heap, packet)
-			packet2, more := <-h.pushedPackets
-			if !more {
-				return 0, io.EOF
-			}
-			heap.Push(&h.heap, packet2)
+		if len(h.heap) >= h.maxPackets {
+			// the "reassembly buffer" is too large, and we want to
+			// constrain memory usage somehow. let's tear down the
+			// connection, and hope the application retries.
+			return 0, errors.New("closed")
 		}
+		heap.Push(&h.heap, packet)
+		packet2, more := <-h.pushedPackets
+		if !more {
+			return 0, io.EOF
+		}
+		heap.Push(&h.heap, packet2)
 	}
-
-	return 0, nil
 }
 
 type uploadHeap []Packet

@@ -8,6 +8,10 @@ import (
 )
 
 type managedConn struct {
+	id         uint64
+	sessionID  string
+	mode       string
+	config     *SplitHTTPConfig
 	writer     io.WriteCloser
 	reader     io.ReadCloser
 	remoteAddr net.Addr
@@ -27,14 +31,16 @@ func (c *managedConn) Read(b []byte) (int, error) {
 func (c *managedConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
-		if c.onClose != nil {
-			c.onClose()
-		}
 		err = c.writer.Close()
 		err2 := c.reader.Close()
 		if err == nil {
 			err = err2
 		}
+		if c.onClose != nil {
+			c.onClose()
+		}
+		active := splitHTTPDiagActiveConns.Add(-1)
+		splitHTTPDiagLog(c.config, "managed-conn close id=%d session=%s mode=%s active=%d", c.id, c.sessionID, c.mode, active)
 	})
 	return err
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"math/rand"
 	"net"
 	"sort"
 	"strconv"
@@ -35,11 +36,44 @@ type RangeConfig struct {
 	To   int
 }
 
+func (r RangeConfig) rand() int {
+	if r.To <= 0 {
+		return 0
+	}
+	if r.From <= 0 {
+		r.From = r.To
+	}
+	if r.To < r.From {
+		r.To = r.From
+	}
+	if r.From == r.To {
+		return r.From
+	}
+	return r.From + rand.Intn(r.To-r.From+1)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+type XmuxConfig struct {
+	MaxConcurrency   *RangeConfig
+	MaxConnections   *RangeConfig
+	CMaxReuseTimes   *RangeConfig
+	HMaxRequestTimes *RangeConfig
+	HMaxReusableSecs *RangeConfig
+	HKeepAlivePeriod int
+}
+
 type SplitHTTPConfig struct {
 	Host               string
 	Path               string
 	ALPN               []string
 	ClientKey          string
+	DownloadConfig     *SplitHTTPConfig
 	DialAddr           string
 	DialTransport      func(ctx context.Context, httpVersion string) (net.Conn, error)
 	H3PacketDial       func(ctx context.Context, rAddr *net.UDPAddr) (net.PacketConn, error)
@@ -49,23 +83,73 @@ type SplitHTTPConfig struct {
 	MaxUploadSize      int
 	MaxConcurrentPosts int
 	Mode               string
+	Xmux               *XmuxConfig
 	TLS                bool
 
-	XPaddingBytes       *RangeConfig
-	XPaddingObfsMode    bool
-	XPaddingKey         string
-	XPaddingHeader      string
-	XPaddingPlacement   string
-	XPaddingMethod      string
-	UplinkHTTPMethod    string
-	SessionPlacement    string
-	SessionKey          string
-	SeqPlacement        string
-	SeqKey              string
-	UplinkDataPlacement string
-	UplinkDataKey       string
-	RequestLog          bool
-	TryQUIC             bool
+	XPaddingBytes        *RangeConfig
+	XPaddingObfsMode     bool
+	XPaddingKey          string
+	XPaddingHeader       string
+	XPaddingPlacement    string
+	XPaddingMethod       string
+	UplinkHTTPMethod     string
+	ScMaxEachPostBytes   *RangeConfig
+	ScMinPostsInterval   *RangeConfig
+	ScMaxBufferedPosts   int
+	ScStreamUpServerSec  *RangeConfig
+	NoSSEHeader          bool
+	SessionPlacement     string
+	SessionKey           string
+	SeqPlacement         string
+	SeqKey               string
+	UplinkDataPlacement  string
+	UplinkDataKey        string
+	UplinkChunkSize      *RangeConfig
+	ServerMaxHeaderBytes int
+	RequestLog           bool
+	TryQUIC              bool
+}
+
+func (c *SplitHTTPConfig) GetNormalizedXmux() XmuxConfig {
+	if c.Xmux == nil {
+		return XmuxConfig{}
+	}
+	return *c.Xmux
+}
+
+func (c XmuxConfig) GetNormalizedMaxConcurrency() RangeConfig {
+	if c.MaxConcurrency == nil || c.MaxConcurrency.To <= 0 {
+		return RangeConfig{}
+	}
+	return *c.MaxConcurrency
+}
+
+func (c XmuxConfig) GetNormalizedMaxConnections() RangeConfig {
+	if c.MaxConnections == nil || c.MaxConnections.To <= 0 {
+		return RangeConfig{}
+	}
+	return *c.MaxConnections
+}
+
+func (c XmuxConfig) GetNormalizedCMaxReuseTimes() RangeConfig {
+	if c.CMaxReuseTimes == nil || c.CMaxReuseTimes.To <= 0 {
+		return RangeConfig{}
+	}
+	return *c.CMaxReuseTimes
+}
+
+func (c XmuxConfig) GetNormalizedHMaxRequestTimes() RangeConfig {
+	if c.HMaxRequestTimes == nil || c.HMaxRequestTimes.To <= 0 {
+		return RangeConfig{}
+	}
+	return *c.HMaxRequestTimes
+}
+
+func (c XmuxConfig) GetNormalizedHMaxReusableSecs() RangeConfig {
+	if c.HMaxReusableSecs == nil || c.HMaxReusableSecs.To <= 0 {
+		return RangeConfig{}
+	}
+	return *c.HMaxReusableSecs
 }
 
 func (c *SplitHTTPConfig) HasALPN(token string) bool {
@@ -193,6 +277,64 @@ func (c *SplitHTTPConfig) GetNormalizedUplinkHTTPMethod() string {
 		return "POST"
 	}
 	return strings.ToUpper(c.UplinkHTTPMethod)
+}
+
+func (c *SplitHTTPConfig) GetNormalizedScMaxEachPostBytes() RangeConfig {
+	if c.ScMaxEachPostBytes != nil && c.ScMaxEachPostBytes.To > 0 {
+		return *c.ScMaxEachPostBytes
+	}
+	if c.MaxUploadSize > 0 {
+		return RangeConfig{From: c.MaxUploadSize, To: c.MaxUploadSize}
+	}
+	return RangeConfig{From: 1000000, To: 1000000}
+}
+
+func (c *SplitHTTPConfig) GetNormalizedScMinPostsInterval() RangeConfig {
+	if c.ScMinPostsInterval != nil && c.ScMinPostsInterval.To > 0 {
+		return *c.ScMinPostsInterval
+	}
+	return RangeConfig{From: 30, To: 30}
+}
+
+func (c *SplitHTTPConfig) GetNormalizedScMaxBufferedPosts() int {
+	if c.ScMaxBufferedPosts > 0 {
+		return c.ScMaxBufferedPosts
+	}
+	if c.MaxConcurrentPosts > 0 {
+		return c.MaxConcurrentPosts
+	}
+	return 30
+}
+
+func (c *SplitHTTPConfig) GetNormalizedScStreamUpServerSecs() RangeConfig {
+	if c.ScStreamUpServerSec != nil && c.ScStreamUpServerSec.To > 0 {
+		return *c.ScStreamUpServerSec
+	}
+	return RangeConfig{From: 20, To: 80}
+}
+
+func (c *SplitHTTPConfig) GetNormalizedUplinkChunkSize() RangeConfig {
+	if c.UplinkChunkSize == nil || c.UplinkChunkSize.To <= 0 {
+		switch c.GetNormalizedUplinkDataPlacement() {
+		case PlacementCookie:
+			return RangeConfig{From: 2 * 1024, To: 3 * 1024}
+		case PlacementHeader:
+			return RangeConfig{From: 3 * 1000, To: 4 * 1000}
+		default:
+			return c.GetNormalizedScMaxEachPostBytes()
+		}
+	}
+	if c.UplinkChunkSize.From < 64 {
+		return RangeConfig{From: 64, To: maxInt(64, c.UplinkChunkSize.To)}
+	}
+	return *c.UplinkChunkSize
+}
+
+func (c *SplitHTTPConfig) GetNormalizedServerMaxHeaderBytes() int {
+	if c.ServerMaxHeaderBytes <= 0 {
+		return 8192
+	}
+	return c.ServerMaxHeaderBytes
 }
 
 func (c *SplitHTTPConfig) GetNormalizedSessionPlacement() string {

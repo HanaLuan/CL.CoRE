@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -26,6 +27,35 @@ import (
 	"github.com/metacubex/tls"
 	"golang.org/x/exp/slices"
 )
+
+func parseSplitHTTPRangeString(value string) (*splithttp.RangeConfig, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+
+	parts := strings.Split(value, "-")
+	switch len(parts) {
+	case 1:
+		n, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+		if err != nil {
+			return nil, err
+		}
+		return &splithttp.RangeConfig{From: n, To: n}, nil
+	case 2:
+		from, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+		if err != nil {
+			return nil, err
+		}
+		to, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil {
+			return nil, err
+		}
+		return &splithttp.RangeConfig{From: from, To: to}, nil
+	default:
+		return nil, errors.New("invalid splithttp range")
+	}
+}
 
 type Listener struct {
 	closed     bool
@@ -156,10 +186,21 @@ func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 		}
 	}
 	if config.XHTTPConfig.Path != "" || config.XHTTPConfig.Host != "" || config.XHTTPConfig.Mode != "" {
+		scStreamUpServerSecs, err := parseSplitHTTPRangeString(config.XHTTPConfig.ScStreamUpServerSecs)
+		if err != nil {
+			return nil, errors.New("invalid xhttp sc-stream-up-server-secs")
+		}
+		scMaxEachPostBytes, err := parseSplitHTTPRangeString(config.XHTTPConfig.ScMaxEachPostBytes)
+		if err != nil {
+			return nil, errors.New("invalid xhttp sc-max-each-post-bytes")
+		}
 		importSplithttpConfig := &splithttp.SplitHTTPConfig{
-			Path:               config.XHTTPConfig.Path,
-			Host:               config.XHTTPConfig.Host,
-			MaxConcurrentPosts: 100,
+			Path:                config.XHTTPConfig.Path,
+			Host:                config.XHTTPConfig.Host,
+			MaxConcurrentPosts:  100,
+			NoSSEHeader:         config.XHTTPConfig.NoSSEHeader,
+			ScStreamUpServerSec: scStreamUpServerSecs,
+			ScMaxEachPostBytes:  scMaxEachPostBytes,
 		}
 		xhttpPath := importSplithttpConfig.GetNormalizedPath()
 		splithttpServer := splithttp.NewSplitHTTPServer(importSplithttpConfig, func(conn net.Conn) {
@@ -177,7 +218,6 @@ func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 			httpMux.Handle("/", httpServer.Handler)
 		}
 		httpServer.Handler = httpMux
-
 		if !slices.Contains(tlsConfig.NextProtos, "h2") {
 			tlsConfig.NextProtos = append([]string{"h2"}, tlsConfig.NextProtos...)
 		}
