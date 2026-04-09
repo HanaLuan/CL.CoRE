@@ -109,9 +109,6 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 	if len(m.xmuxClients) == 0 {
 		return m.newXmuxClient()
 	}
-	if m.connections > 0 && len(m.xmuxClients) < int(m.connections) {
-		return m.newXmuxClient()
-	}
 
 	candidates := make([]*XmuxClient, 0, len(m.xmuxClients))
 	if m.concurrency > 0 {
@@ -125,7 +122,12 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 	}
 
 	if len(candidates) == 0 {
-		return m.newXmuxClient()
+		if m.connections == 0 || len(m.xmuxClients) < int(m.connections) {
+			return m.newXmuxClient()
+		}
+		// Respect maxConnections as a hard cap once all clients are busy.
+		// Falling back to an existing client avoids unbounded H2 client growth.
+		candidates = m.xmuxClients
 	}
 
 	index, err := rand.Int(rand.Reader, big.NewInt(int64(len(candidates))))

@@ -27,8 +27,48 @@ func TestXmuxManagerMaxConnections(t *testing.T) {
 		clients[manager.GetXmuxClient(context.Background())] = struct{}{}
 	}
 
+	if len(clients) != 1 {
+		t.Fatalf("expected sequential reuse to keep 1 xmux client, got %d", len(clients))
+	}
+}
+
+func TestXmuxManagerMaxConnectionsUnderConcurrency(t *testing.T) {
+	manager := NewXmuxManager(nil, XmuxConfig{
+		MaxConnections: &RangeConfig{From: 4, To: 4},
+		MaxConcurrency: &RangeConfig{From: 1, To: 1},
+	}, func() XmuxConn {
+		return &fakeXmuxConn{}
+	})
+
+	clients := map[*XmuxClient]struct{}{}
+	for i := 0; i < 8; i++ {
+		client := manager.GetXmuxClient(context.Background())
+		client.OpenUsage.Add(1)
+		clients[client] = struct{}{}
+	}
+
 	if len(clients) != 4 {
-		t.Fatalf("expected 4 distinct xmux clients, got %d", len(clients))
+		t.Fatalf("expected 4 distinct xmux clients under concurrency pressure, got %d", len(clients))
+	}
+}
+
+func TestXmuxManagerDoesNotExceedMaxConnectionsWhenBusy(t *testing.T) {
+	manager := NewXmuxManager(nil, XmuxConfig{
+		MaxConnections: &RangeConfig{From: 2, To: 2},
+		MaxConcurrency: &RangeConfig{From: 1, To: 1},
+	}, func() XmuxConn {
+		return &fakeXmuxConn{}
+	})
+
+	clients := map[*XmuxClient]struct{}{}
+	for i := 0; i < 8; i++ {
+		client := manager.GetXmuxClient(context.Background())
+		client.OpenUsage.Add(1)
+		clients[client] = struct{}{}
+	}
+
+	if len(clients) != 2 {
+		t.Fatalf("expected maxConnections to cap xmux clients at 2, got %d", len(clients))
 	}
 }
 

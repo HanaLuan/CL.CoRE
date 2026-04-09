@@ -90,6 +90,13 @@ func (c *DefaultDialerClient) IsClosed() bool {
 	return c.closed.Load()
 }
 
+func (c *DefaultDialerClient) retire() {
+	if c.closed.Swap(true) {
+		return
+	}
+	splitHTTPDiagLog(c.transportConfig, "dialer-client retire http=%s host=%s "+splitHTTPDiagSnapshot(), c.httpVersion, c.transportConfig.Host, splitHTTPDiagActiveClients.Load(), splitHTTPDiagActiveConns.Load(), splitHTTPDiagActiveWriters.Load(), splitHTTPDiagActiveH1Conns.Load(), splitHTTPDiagInFlightOpen.Load(), splitHTTPDiagInFlightPost.Load())
+}
+
 func (c *DefaultDialerClient) markClosed() {
 	alreadyClosed := c.closed.Swap(true)
 	if tr, ok := c.client.Transport.(interface{ CloseIdleConnections() }); ok {
@@ -191,7 +198,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		resp, reqErr := c.client.Do(req)
 		if reqErr != nil {
 			if !uploadOnly {
-				c.markClosed()
+				c.retire()
 				log.Debugln("splithttp shared client open stream failed: %v", reqErr)
 			}
 			closeGotConn()
@@ -265,7 +272,7 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 	if c.httpVersion != "1.1" {
 		resp, err := c.client.Do(req)
 		if err != nil {
-			c.markClosed()
+			c.retire()
 			return err
 		}
 		logResponse(c.transportConfig, "packet-up", resp, sessionID, seqStr, meta)
@@ -311,7 +318,7 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 				if err != nil {
 					c.untrackUploadConn(h1UploadConn)
 					_ = h1UploadConn.Close()
-					c.markClosed()
+					c.retire()
 					return fmt.Errorf("error while reading response: %w", err)
 				}
 				_, _ = io.Copy(io.Discard, resp.Body)
