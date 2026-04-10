@@ -411,6 +411,86 @@ func TestInboundVless_XHTTP(t *testing.T) {
 	}
 }
 
+func TestInboundVless_XHTTP_UDP(t *testing.T) {
+	testCases := []struct {
+		name string
+		flow string
+	}{
+		{name: "raw"},
+		{name: "vision", flow: "xtls-rprx-vision"},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			inboundOptions := inbound.VlessOption{
+				Certificate: tlsCertificate,
+				PrivateKey:  tlsPrivateKey,
+				XHTTPConfig: inbound.XHTTPConfig{
+					Path: "/vless-xhttp",
+					Host: "example.com",
+					Mode: "packet-up",
+				},
+			}
+			inboundOptions.BaseOption = inbound.BaseOption{
+				NameStr: "vless_inbound_udp",
+				Listen:  "127.0.0.1",
+				Port:    "0",
+			}
+			inboundOptions.Users = []inbound.VlessUser{
+				{Username: "test", UUID: userUUID, Flow: "xtls-rprx-vision"},
+			}
+
+			in, err := inbound.NewVless(&inboundOptions)
+			if !assert.NoError(t, err) {
+				return
+			}
+
+			tunnel := NewUDPEchoTestTunnel()
+			defer tunnel.Close()
+
+			err = in.Listen(tunnel)
+			if !assert.NoError(t, err) {
+				return
+			}
+			defer in.Close()
+
+			addrPort, err := netip.ParseAddrPort(in.Address())
+			if !assert.NoError(t, err) {
+				return
+			}
+
+			outboundOptions := outbound.VlessOption{
+				Name:              "vless_outbound_udp",
+				Server:            addrPort.Addr().String(),
+				Port:              int(addrPort.Port()),
+				UUID:              userUUID,
+				TLS:               true,
+				Fingerprint:       tlsFingerprint,
+				ServerName:        "example.org",
+				ClientFingerprint: "chrome",
+				Flow:              testCase.flow,
+				Network:           "xhttp",
+				XHTTPOpts: outbound.XHTTPOptions{
+					Path: "/vless-xhttp",
+					Host: "example.com",
+					Mode: "packet-up",
+				},
+				UDP:            true,
+				PacketEncoding: "xudp",
+			}
+
+			out, err := outbound.NewVless(outboundOptions)
+			if !assert.NoError(t, err) {
+				return
+			}
+			defer out.Close()
+
+			tunnel.DoSequentialTest(t, out)
+		})
+	}
+}
+
 func TestInboundVless_XHTTP_Reality(t *testing.T) {
 	testCases := []struct {
 		mode string
@@ -489,21 +569,12 @@ func TestInboundVless_XHTTP_Reality(t *testing.T) {
 }
 
 func withXHTTPReuse(out outbound.VlessOption) outbound.VlessOption {
-	out.XHTTPOpts.ReuseSettings = &outbound.XHTTPReuseSettings{
-		MaxConnections:   "0",
-		MaxConcurrency:   "16-32",
-		CMaxReuseTimes:   "0",
-		HMaxRequestTimes: "600-900",
-		HMaxReusableSecs: "1800-3000",
-	}
-	if out.XHTTPOpts.DownloadSettings != nil {
-		out.XHTTPOpts.DownloadSettings.ReuseSettings = &outbound.XHTTPReuseSettings{
-			MaxConnections:   "0",
-			MaxConcurrency:   "16-32",
-			CMaxReuseTimes:   "0",
-			HMaxRequestTimes: "600-900",
-			HMaxReusableSecs: "1800-3000",
-		}
+	out.XHTTPOpts.Xmux = outbound.XmuxOptions{
+		MaxConnections:   outbound.SplitHTTPRangeOption{From: 0, To: 0},
+		MaxConcurrency:   outbound.SplitHTTPRangeOption{From: 16, To: 32},
+		CMaxReuseTimes:   outbound.SplitHTTPRangeOption{From: 0, To: 0},
+		HMaxRequestTimes: outbound.SplitHTTPRangeOption{From: 600, To: 900},
+		HMaxReusableSecs: outbound.SplitHTTPRangeOption{From: 1800, To: 3000},
 	}
 	return out
 }

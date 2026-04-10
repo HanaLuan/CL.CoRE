@@ -306,3 +306,49 @@ func NewHttpTestTunnel() *TestTunnel {
 	}
 	return tunnel
 }
+
+func NewUDPEchoTestTunnel() *TestTunnel {
+	return &TestTunnel{
+		HandleUDPPacketFn: func(packet C.UDPPacket, metadata *C.Metadata) {
+			defer packet.Drop()
+			if metadata.DstIP != remoteAddr || metadata.DstPort != 10001 {
+				return
+			}
+			payload := append([]byte(nil), packet.Data()...)
+			_, _ = packet.WriteBack(payload, nil)
+		},
+		CloseFn: func() error { return nil },
+		DoSequentialTestFn: func(t *testing.T, proxy C.ProxyAdapter) {
+			pc, err := proxy.ListenPacketContext(context.Background(), &C.Metadata{
+				NetWork: C.UDP,
+				DstIP:   remoteAddr,
+				DstPort: 10001,
+			})
+			if !assert.NoError(t, err) {
+				return
+			}
+			defer pc.Close()
+
+			target := net.UDPAddrFromAddrPort(netip.AddrPortFrom(remoteAddr, 10001))
+			if err := pc.SetDeadline(time.Now().Add(5 * time.Second)); !assert.NoError(t, err) {
+				return
+			}
+			_, err = pc.WriteTo([]byte("ping"), target)
+			if !assert.NoError(t, err) {
+				return
+			}
+
+			buf := make([]byte, 64)
+			n, addr, err := pc.ReadFrom(buf)
+			if !assert.NoError(t, err) {
+				return
+			}
+			assert.Equal(t, "ping", string(buf[:n]))
+			if udpAddr, ok := addr.(*net.UDPAddr); ok {
+				assert.Equal(t, remoteAddr, netip.MustParseAddr(udpAddr.IP.String()))
+				assert.Equal(t, 10001, udpAddr.Port)
+			}
+		},
+		DoConcurrentTestFn: func(t *testing.T, proxy C.ProxyAdapter) {},
+	}
+}

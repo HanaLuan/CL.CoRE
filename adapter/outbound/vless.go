@@ -396,8 +396,38 @@ func (v *Vless) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 	}
 
 	if v.option.Network == "xhttp" || v.option.Network == "splithttp" {
+		if v.option.XUDP {
+			splitConfig, err := v.buildSplitHTTPConfig(ctx)
+			if err != nil {
+				return nil, err
+			}
+			c, err := splithttp.DialContextWithOptions(ctx, splitConfig, splithttp.DialRuntime{HasReality: v.realityConfig != nil})
+			if err != nil {
+				return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
+			}
+			if v.encryption != nil {
+				c, err = v.encryption.Handshake(c)
+				if err != nil {
+					_ = c.Close()
+					return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
+				}
+			}
+			var globalID [8]byte
+			if metadata.SourceValid() {
+				globalID = utils.GlobalID(metadata.SourceAddress())
+			}
+			pc, err := v.client.DialEarlyXUDPPacketConn(c, globalID, metadata.UDPAddr(), parseVlessAddr(metadata, true))
+			if err != nil {
+				_ = c.Close()
+				return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
+			}
+			return newPacketConn(N.NewThreadSafePacketConn(pc), v), nil
+		}
 		c, err := v.StreamConnContext(ctx, nil, metadata)
 		if err != nil {
+			return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
+		}
+		if err = earlyHandshakePacketConn(c); err != nil {
 			return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
 		}
 		if v.option.XUDP {
@@ -449,6 +479,20 @@ func (v *Vless) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 		), v), nil
 	}
 	return newPacketConn(N.NewThreadSafePacketConn(v.client.PacketConn(c, metadata.UDPAddr())), v), nil
+}
+
+func earlyHandshakePacketConn(c net.Conn) error {
+	if !N.NeedHandshake(c) {
+		return nil
+	}
+	// Xray flushes the VLESS request header early for xhttp/xudp instead of
+	// waiting for the first payload write. Without this, packet-up sessions
+	// rely on the first application datagram to establish the logical stream.
+	if _, err := c.Write(nil); err != nil {
+		_ = c.Close()
+		return err
+	}
+	return nil
 }
 
 // SupportUOT implements C.ProxyAdapter

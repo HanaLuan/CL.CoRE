@@ -1,12 +1,39 @@
 package vless
 
 import (
+	"io"
 	"net"
 
 	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/transport/vless/vision"
+	vmessSing "github.com/metacubex/sing-vmess"
+	M "github.com/metacubex/sing/common/metadata"
 
 	"github.com/gofrs/uuid/v5"
 )
+
+func (c *Client) prepareConn(rawConn *Conn, tlsConn net.Conn) (net.Conn, error) {
+	if c.Addons != nil {
+		switch c.Addons.Flow {
+		case XRV:
+			visionConn, err := vision.NewConn(rawConn, tlsConn, rawConn.id)
+			if err != nil {
+				return nil, err
+			}
+			return visionConn, nil
+		}
+	}
+	return rawConn, nil
+}
+
+func (c *Client) PrepareConn(conn net.Conn, dst *DstAddr) (net.Conn, io.Writer, error) {
+	rawConn := newBaseConn(conn, c, dst)
+	protocolConn, err := c.prepareConn(rawConn, conn)
+	if err != nil {
+		return nil, nil, err
+	}
+	return protocolConn, rawConn, nil
+}
 
 const (
 	XRO = "xtls-rprx-origin"
@@ -48,11 +75,23 @@ type Client struct {
 
 // StreamConn return a Conn with net.Conn and DstAddr
 func (c *Client) StreamConn(conn net.Conn, dst *DstAddr) (net.Conn, error) {
-	return newConn(conn, c, dst)
+	protocolConn, _, err := c.PrepareConn(conn, dst)
+	return protocolConn, err
 }
 
 func (c *Client) PacketConn(conn net.Conn, rAddr net.Addr) net.PacketConn {
 	return &PacketConn{conn, rAddr}
+}
+
+func (c *Client) DialEarlyXUDPPacketConn(conn net.Conn, globalID [8]byte, destination net.Addr, dst *DstAddr) (net.PacketConn, error) {
+	protocolConn, requestWriter, err := c.PrepareConn(conn, dst)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = requestWriter.Write(nil); err != nil {
+		return nil, err
+	}
+	return vmessSing.NewXUDPConn(protocolConn, globalID, M.SocksaddrFromNet(destination)), nil
 }
 
 // NewClient return Client instance
