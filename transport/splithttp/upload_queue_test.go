@@ -70,8 +70,8 @@ func TestUploadQueueRejectsOversizedReassemblyBuffer(t *testing.T) {
 
 	buf := make([]byte, 8)
 	_, err := queue.Read(buf)
-	if err == nil || err.Error() != "closed" {
-		t.Fatalf("Read error = %v, want closed", err)
+	if err != ErrQueueTooLarge {
+		t.Fatalf("Read error = %v, want %v", err, ErrQueueTooLarge)
 	}
 
 	if err := queue.Close(); err != nil && err != io.EOF {

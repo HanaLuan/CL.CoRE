@@ -807,8 +807,7 @@ proxies: # socks5
     udp: true
     tls: true
     network: xhttp
-    alpn:
-      - h2
+    alpn: [h2] # 默认仅支持h2，如果开启h3模式需要设置alpn: [h3]，如果开启http1.1模式需要设置alpn: [http/1.1]
     # ech-opts: ...
     # reality-opts: ...
     # skip-cert-verify: false
@@ -826,34 +825,46 @@ proxies: # socks5
       #   X-Forwarded-For: ""
       # no-grpc-header: false
       # x-padding-bytes: "100-1000"
+      # x-padding-obfs-mode: false
+      # x-padding-key: x_padding
+      # x-padding-header: Referer
+      # x-padding-placement: queryInHeader # Available: queryInHeader, cookie, header, query
+      # x-padding-method: repeat-x # Available: repeat-x, tokenish
+      # uplink-http-method: POST # Available: POST, PUT, PATCH, DELETE
+      # session-placement: path # Available: path, query, cookie, header
+      # session-key: ""
+      # seq-placement: path # Available: path, query, cookie, header
+      # seq-key: ""
+      # uplink-data-placement: body # Available: body, cookie, header
+      # uplink-data-key: ""
+      # uplink-chunk-size: 0 # only applicable when uplink-data-placement is not body
       # sc-max-each-post-bytes: 1000000
+      # sc-min-posts-interval-ms: 30
       # reuse-settings: # aka XMUX
-      #   max-connections: "16-32"
-      #   max-concurrency: "0"
+      #   max-concurrency: "16-32"
+      #   max-connections: "0"
       #   c-max-reuse-times: "0"
       #   h-max-request-times: "600-900"
       #   h-max-reusable-secs: "1800-3000"
+      #   h-keep-alive-period: 0
       # download-settings:
       #   ## xhttp part
       #   path: "/"
       #   host: xxx.com
       #   headers:
       #     X-Forwarded-For: ""
-      #   no-grpc-header: false
-      #   x-padding-bytes: "100-1000"
-      #   sc-max-each-post-bytes: 1000000
       #   reuse-settings: # aka XMUX
-      #     max-connections: "16-32"
-      #     max-concurrency: "0"
+      #     max-concurrency: "16-32"
+      #     max-connections: "0"
       #     c-max-reuse-times: "0"
       #     h-max-request-times: "600-900"
       #     h-max-reusable-secs: "1800-3000"
+      #     h-keep-alive-period: 0
       #   ## proxy part
       #   server: server
       #   port: 443
       #   tls: true
-      #   alpn:
-      #     - h2
+      #   alpn: ...
       #   ech-opts: ...
       #   reality-opts: ...
       #   skip-cert-verify: false
@@ -982,10 +993,11 @@ proxies: # socks5
     server: server.com
     port: 443
     # ports: 1000,2000-3000,5000 # port 不可省略
-    # hop-interval: 15
+    # hop-interval: 15 # 支持填写"15-30"会每次随机选取其中一个值作为切换间隔，仅支持写一个范围（即不允许出现逗号）
     #  up 和 down 均不写或为 0 则使用 BBR 流控
     # up: "30 Mbps" # 若不写单位，默认为 Mbps
     # down: "200 Mbps" # 若不写单位，默认为 Mbps
+    # bbr-profile: "" # Available: "standard", "conservative", "aggressive". Default: "standard"
     password: yourpassword
     # obfs: salamander # 默认为空，如果填写则开启 obfs，目前仅支持 salamander
     # obfs-password: yourpassword
@@ -1080,6 +1092,23 @@ proxies: # socks5
     # dns: [ 1.1.1.1, 8.8.8.8 ] # 仅在 remote-dns-resolve 为 true 时生效
     # congestion-controller: bbr # 默认不开启
 
+  # masque-h2
+  - name: "masque-h2"
+    type: masque
+    server: 162.159.198.2
+    port: 443
+    private-key: MHcCAQEEILI1eOtnbEIh89Fj4yNDuFR6UjayCKI3NdLl3DhetimWoAoGCCqGSM49AwEHoUQDQgAEgyXrE8v+hHsHy3ewSb3WcRjYgCrM9T9hiE0Uv6k2DZ1+4kefrDT9v1Q/8wdRigTf6t6gGNUV8W+IUMdrfUt+9g==
+    public-key: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIaU7MToJm9NKp8YfGxR6r+/h4mcG7SxI8tsW8OR1A5tv/zCzVbCRRh2t87/kxnP6lAy0lkr7qYwu+ox+k3dr6w==
+    ip: 172.16.0.2
+    ipv6: 2606:4700:110:84c0:163a:4914:a0ad:3342
+    mtu: 1280
+    udp: true
+    network: h2
+    # 一个出站代理的标识。当值不为空时，将使用指定的 proxy 发出连接
+    # dialer-proxy: "ss1"
+    # remote-dns-resolve: true # 强制 dns 远程解析，默认值为 false
+    # dns: [ 1.1.1.1, 8.8.8.8 ] # 仅在 remote-dns-resolve 为 true 时生效
+
   # tuic
   - name: tuic
     server: www.example.com
@@ -1099,6 +1128,7 @@ proxies: # socks5
     udp-relay-mode: native # Available: "native", "quic". Default: "native"
     # congestion-controller: bbr # Available: "cubic", "new_reno", "bbr". Default: "cubic"
     # cwnd: 10 # default: 32
+    # bbr-profile: "" # Available: "standard", "conservative", "aggressive". Default: "standard"
     # max-udp-relay-packet-size: 1500
     # fast-open: true
     # skip-cert-verify: true
@@ -1167,7 +1197,7 @@ proxies: # socks5
     server: server_ip/domain # 1.2.3.4 or domain
     port: 443 
     key: "<client_key>" # 如果你使用sudoku生成的ED25519密钥对，请填写密钥对中的私钥，否则填入和服务端相同的uuid
-    aead-method: chacha20-poly1305 # 可选：chacha20-poly1305、aes-128-gcm、none（不建议；且 enable-pure-downlink=false 时不可用）
+    aead-method: chacha20-poly1305 # 可选：chacha20-poly1305、aes-128-gcm、none（不建议；none 不提供 AEAD 保护）
     padding-min: 2 # 最小填充率（0-100）
     padding-max: 7 # 最大填充率（0-100，必须 >= padding-min）
     table-type: prefer_ascii    # 可选值：prefer_ascii、prefer_entropy、up_ascii_down_entropy、up_entropy_down_ascii
@@ -1181,7 +1211,7 @@ proxies: # socks5
       # host: "" # 可选：覆盖 Host/SNI（支持 example.com 或 example.com:443）；仅在 mode 为 stream/poll/auto/ws 时生效
       # path-root: "" # 可选：HTTP 隧道端点一级路径前缀（双方需一致），例如 "aabbcc" 或 "/aabbcc/" => /aabbcc/session、/aabbcc/stream、/aabbcc/api/v1/upload、/aabbcc/ws
       # multiplex: "off" # 可选字符串：off（默认）、auto（复用底层 HTTP 连接，减少建链 RTT）、on（Sudoku mux 单隧道多目标；仅在 mode=stream/poll/auto 生效；ws 强制 off）
-    enable-pure-downlink: false # 可选：false=带宽优化下行（更快，要求 aead-method != none）；true=纯 Sudoku 下行
+    enable-pure-downlink: false # 可选：false=带宽优化下行；true=纯 Sudoku 下行
 
   # anytls
   - name: anytls
@@ -1217,6 +1247,7 @@ proxies: # socks5
     ### quic options
     # quic: true # 默认为false
     # congestion-controller: bbr
+    # bbr-profile: "" # Available: "standard", "conservative", "aggressive". Default: "standard"
     ### reuse options
     # max-connections: 8 # Maximum connections. Conflict with max-streams.
     # min-streams: 5 # Minimum multiplexed streams in a connection before opening a new connection. Conflict with max-streams.
@@ -1632,6 +1663,7 @@ listeners:
     #    dC5jb20AAA==
     #    -----END ECH KEYS-----
     #  congestion-controller: bbr
+    #  bbr-profile: "" # Available: "standard", "conservative", "aggressive". Default: "standard"
     #  max-idle-time: 15000
     #  authentication-timeout: 1000
     #  alpn:
@@ -1664,6 +1696,21 @@ listeners:
     #   host: ""
     #   mode: auto # Available: "stream-one", "stream-up" or "packet-up"
     #   no-sse-header: false
+    #   x-padding-bytes: "100-1000"
+    #   x-padding-obfs-mode: false
+    #   x-padding-key: x_padding
+    #   x-padding-header: Referer
+    #   x-padding-placement: queryInHeader # Available: queryInHeader, cookie, header, query
+    #   x-padding-method: repeat-x # Available: repeat-x, tokenish
+    #   uplink-http-method: POST # Available: POST, PUT, PATCH, DELETE
+    #   session-placement: path # Available: path, query, cookie, header
+    #   session-key: ""
+    #   seq-placement: path # Available: path, query, cookie, header
+    #   seq-key: ""
+    #   uplink-data-placement: body # Available: body, cookie, header
+    #   uplink-data-key: ""
+    #   uplink-chunk-size: 0 # only applicable when uplink-data-placement is not body
+    #   sc-max-buffered-posts: 30
     #   sc-stream-up-server-secs: "20-80"
     #   sc-max-each-post-bytes: 1000000
     # -------------------------
@@ -1744,20 +1791,22 @@ listeners:
       username2: password2
     # 一个 base64 字符串用于微调网络行为
     # traffic-pattern: ""
+    # 如果开启，且客户端不发送用户提示，代理服务器将拒绝连接
+    # user-hint-is-mandatory: false
 
   - name: sudoku-in-1
     type: sudoku
     port: 8443 # 仅支持单端口
     listen: 0.0.0.0
     key: "<server_key>" # 如果你使用sudoku生成的ED25519密钥对，此处是密钥对中的公钥，当然，你也可以仅仅使用任意uuid充当key
-    aead-method: chacha20-poly1305 # 可选：chacha20-poly1305、aes-128-gcm、none（不建议；且 enable-pure-downlink=false 时不可用）
+    aead-method: chacha20-poly1305 # 可选：chacha20-poly1305、aes-128-gcm、none（不建议；none 不提供 AEAD 保护）
     padding-min: 1 # 最小填充率（0-100）
     padding-max: 15 # 最大填充率（0-100，必须 >= padding-min）
     table-type: prefer_ascii # 可选值：prefer_ascii、prefer_entropy、up_ascii_down_entropy、up_entropy_down_ascii
     # custom-table: xpxvvpvv # 可选，自定义字节布局，必须包含2个x、2个p、4个v，可随意组合；只对 entropy 方向生效
     # custom-tables: ["xpxvvpvv", "vxpvxvvp"] # 可选，自定义字节布局列表（x/v/p），用于多表轮换；非空时覆盖 custom-table
     handshake-timeout: 5   # 可选（秒）
-    enable-pure-downlink: false # 可选：false=带宽优化下行（更快，要求 aead-method != none）；true=纯 Sudoku 下行
+    enable-pure-downlink: false # 可选：false=带宽优化下行；true=纯 Sudoku 下行
     # 推荐：使用 httpmask 对象统一管理 HTTPMask 相关字段：
     httpmask:
       disable: false # true 禁用所有 HTTP 伪装/隧道
@@ -1842,6 +1891,7 @@ listeners:
     #  down: "200 Mbps" # 若不写单位，默认为 Mbps
     #  obfs: salamander # 默认为空，如果填写则开启 obfs，目前仅支持 salamander
     #  obfs-password: yourpassword
+    #  bbr-profile: "" # Available: "standard", "conservative", "aggressive". Default: "standard"
     #  max-idle-time: 15000
     #  alpn:
     #    - h3
@@ -1864,6 +1914,7 @@ listeners:
     private-key: ./server.key # 证书对应的私钥 PEM 格式，或者私钥路径
     network: ["tcp", "udp"] # http2+http3
     congestion-controller: bbr
+    # bbr-profile: "" # Available: "standard", "conservative", "aggressive". Default: "standard"
     # 下面两项为mTLS配置项，如果client-auth-type设置为 "verify-if-given" 或 "require-and-verify" 则client-auth-cert必须不为空
     # client-auth-type: "" # 可选值：""、"request"、"require-any"、"verify-if-given"、"require-and-verify"
     # client-auth-cert: string # 证书 PEM 格式，或者 证书的路径
@@ -1939,6 +1990,7 @@ listeners:
 #  certificate: ./server.crt
 #  private-key: ./server.key
 #  congestion-controller: bbr
+#  bbr-profile: "" # Available: "standard", "conservative", "aggressive". Default: "standard"
 #  max-idle-time: 15000
 #  authentication-timeout: 1000
 #  alpn:

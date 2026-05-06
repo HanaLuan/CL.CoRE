@@ -199,6 +199,7 @@ func buildSplitHTTPConfig(ctx context.Context, addr string, tlsServerName string
 		MaxConcurrentPosts:   xhttpOpts.MaxConcurrentPosts,
 		Mode:                 xhttpOpts.Mode,
 		Xmux:                 xhttpOpts.Xmux.toXmuxConfig(),
+		NoGRPCHeader:         xhttpOpts.NoGRPCHeader,
 		TLS:                  tlsEnabled,
 		XPaddingObfsMode:     xhttpOpts.XPaddingObfsMode,
 		XPaddingKey:          xhttpOpts.XPaddingKey,
@@ -248,6 +249,9 @@ func buildSplitHTTPConfig(ctx context.Context, addr string, tlsServerName string
 	}
 	if xmuxCfg := splitHTTPOpts.Xmux.toXmuxConfig(); xmuxCfg != nil {
 		config.Xmux = xmuxCfg
+	}
+	if splitHTTPOpts.NoGRPCHeader {
+		config.NoGRPCHeader = true
 	}
 	if splitHTTPOpts.XPaddingBytesTo > 0 {
 		config.XPaddingBytes = &splithttp.RangeConfig{From: splitHTTPOpts.XPaddingBytesFrom, To: splitHTTPOpts.XPaddingBytesTo}

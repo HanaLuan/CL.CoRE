@@ -30,3 +30,6 @@ test/config/cache*
 # Go Cache
 */gocache/
 */gotmp/
+.gocache/
+.gotmp/
+.gopath/

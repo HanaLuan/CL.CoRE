@@ -96,10 +96,7 @@ func (c *Client) DialEarlyXUDPPacketConn(conn net.Conn, globalID [8]byte, destin
 
 // NewClient return Client instance
 func NewClient(uuidStr string, addons *Addons) (*Client, error) {
-	uid, err := utils.UUIDMap(uuidStr)
-	if err != nil {
-		return nil, err
-	}
+	uid := utils.UUIDMap(uuidStr)
 
 	return &Client{
 		uuid:   uid,

@@ -186,3 +186,90 @@ func (c *SplitHTTPConfig) ApplyXPaddingToRequest(req *http.Request, config XPadd
 		applyPaddingToQuery(req.URL, config.Placement.Key, paddingValue)
 	}
 }
+
+func applyPaddingToResponseCookie(writer http.ResponseWriter, name, value string) {
+	if writer == nil || name == "" || value == "" {
+		return
+	}
+	http.SetCookie(writer, &http.Cookie{Name: name, Value: value, Path: "/"})
+}
+
+func (c *SplitHTTPConfig) ApplyXPaddingToResponse(writer http.ResponseWriter, config XPaddingConfig) {
+	if writer == nil {
+		return
+	}
+	placement := config.Placement.Placement
+	if placement == PlacementHeader || placement == PlacementQueryInHeader {
+		c.applyXPaddingToHeader(writer.Header(), config)
+		return
+	}
+
+	paddingValue := generatePadding(config.Method, config.Length)
+	switch placement {
+	case PlacementCookie:
+		applyPaddingToResponseCookie(writer, config.Placement.Key, paddingValue)
+	}
+}
+
+func (c *SplitHTTPConfig) ExtractXPaddingFromRequest(req *http.Request, obfsMode bool) (string, string) {
+	if req == nil {
+		return "", ""
+	}
+
+	if !obfsMode {
+		if referrer := req.Header.Get("Referer"); referrer != "" {
+			if referrerURL, err := url.Parse(referrer); err == nil {
+				return referrerURL.Query().Get("x_padding"), PlacementQueryInHeader + "=Referer, key=x_padding"
+			}
+		} else {
+			return req.URL.Query().Get("x_padding"), PlacementQuery + ", key=x_padding"
+		}
+	}
+
+	key := c.XPaddingKey
+	header := c.XPaddingHeader
+	if key != "" {
+		if cookie, err := req.Cookie(key); err == nil && cookie != nil && cookie.Value != "" {
+			return cookie.Value, PlacementCookie + ", key=" + key
+		}
+	}
+
+	if headerValue := req.Header.Get(header); headerValue != "" {
+		if c.XPaddingPlacement == PlacementHeader {
+			return headerValue, PlacementHeader + "=" + header
+		}
+		if parsedURL, err := url.Parse(headerValue); err == nil {
+			return parsedURL.Query().Get(key), PlacementQueryInHeader + "=" + header + ", key=" + key
+		}
+	}
+
+	if key != "" {
+		if queryValue := req.URL.Query().Get(key); queryValue != "" {
+			return queryValue, PlacementQuery + ", key=" + key
+		}
+	}
+	return "", ""
+}
+
+func (c *SplitHTTPConfig) IsPaddingValid(paddingValue string, from, to int, method PaddingMethod) bool {
+	if paddingValue == "" {
+		return false
+	}
+	if to <= 0 {
+		r := c.GetNormalizedXPaddingBytes()
+		from, to = r.From, r.To
+	}
+
+	switch method {
+	case PaddingMethodTokenish:
+		n := int(hpack.HuffmanEncodeLength(paddingValue))
+		min := from - validationTolerance
+		if min < 0 {
+			min = 0
+		}
+		return n >= min && n <= to+validationTolerance
+	default:
+		n := len(paddingValue)
+		return n >= from && n <= to
+	}
+}

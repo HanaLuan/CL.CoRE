@@ -97,6 +97,7 @@ type SplitHTTPConfig struct {
 	ScMinPostsInterval   *RangeConfig
 	ScMaxBufferedPosts   int
 	ScStreamUpServerSec  *RangeConfig
+	NoGRPCHeader         bool
 	NoSSEHeader          bool
 	SessionPlacement     string
 	SessionKey           string
@@ -262,6 +263,58 @@ func applyDefaultFetchHeaders(header http.Header) {
 	}
 }
 
+func (c *SplitHTTPConfig) WriteResponseHeader(writer http.ResponseWriter, requestMethod string, requestHeader http.Header) {
+	if writer == nil {
+		return
+	}
+	origin := requestHeader.Get("Origin")
+	if origin == "" {
+		writer.Header().Set("Access-Control-Allow-Origin", "*")
+	} else {
+		writer.Header().Set("Access-Control-Allow-Origin", origin)
+	}
+
+	if c.GetNormalizedSessionPlacement() == PlacementCookie ||
+		c.GetNormalizedSeqPlacement() == PlacementCookie ||
+		c.XPaddingPlacement == PlacementCookie ||
+		c.GetNormalizedUplinkDataPlacement() == PlacementCookie {
+		writer.Header().Set("Access-Control-Allow-Credentials", "true")
+	}
+
+	if requestMethod == http.MethodOptions {
+		if requestedMethod := requestHeader.Get("Access-Control-Request-Method"); requestedMethod != "" {
+			writer.Header().Set("Access-Control-Allow-Methods", requestedMethod)
+		} else {
+			writer.Header().Set("Access-Control-Allow-Methods", "*")
+		}
+		if requestedHeaders := requestHeader.Get("Access-Control-Request-Headers"); requestedHeaders != "" {
+			writer.Header().Set("Access-Control-Allow-Headers", requestedHeaders)
+		} else {
+			writer.Header().Set("Access-Control-Allow-Headers", "*")
+		}
+	}
+}
+
+func (c *SplitHTTPConfig) BuildResponseXPadding() XPaddingConfig {
+	padding := XPaddingConfig{
+		Length: randInRange(c.GetNormalizedXPaddingBytes()),
+		Method: PaddingMethodRepeatX,
+		Placement: XPaddingPlacement{
+			Placement: PlacementHeader,
+			Header:    "X-Padding",
+		},
+	}
+	if c.XPaddingObfsMode {
+		padding.Method = PaddingMethod(c.XPaddingMethod)
+		padding.Placement = XPaddingPlacement{
+			Placement: c.XPaddingPlacement,
+			Key:       c.XPaddingKey,
+			Header:    c.XPaddingHeader,
+		}
+	}
+	return padding
+}
+
 func (c *SplitHTTPConfig) GetNormalizedXPaddingBytes() RangeConfig {
 	if c.XPaddingBytes == nil || c.XPaddingBytes.To <= 0 {
 		return RangeConfig{From: 100, To: 1000}
@@ -390,7 +443,7 @@ func (c *SplitHTTPConfig) GetNormalizedUplinkDataKey() string {
 	if c.UplinkDataKey != "" {
 		return c.UplinkDataKey
 	}
-	if c.GetNormalizedUplinkDataPlacement() == PlacementHeader {
+	if c.GetNormalizedUplinkDataPlacement() == PlacementHeader || c.GetNormalizedUplinkDataPlacement() == PlacementAuto {
 		return "X-Data"
 	}
 	if c.GetNormalizedUplinkDataPlacement() == PlacementCookie {
@@ -506,7 +559,7 @@ func (c *SplitHTTPConfig) FillStreamRequest(req *http.Request, sessionID string)
 	c.ApplyXPaddingToRequest(req, padding)
 	c.ApplyMetaToRequest(req, sessionID, "")
 
-	if req.Body != nil && req.Header.Get("Content-Type") == "" {
+	if req.Body != nil && !c.NoGRPCHeader && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/grpc")
 	}
 	if req.Header.Get("User-Agent") == "" {

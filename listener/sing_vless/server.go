@@ -194,13 +194,45 @@ func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 		if err != nil {
 			return nil, errors.New("invalid xhttp sc-max-each-post-bytes")
 		}
+		xPaddingBytes, err := parseSplitHTTPRangeString(config.XHTTPConfig.XPaddingBytes)
+		if err != nil {
+			return nil, errors.New("invalid xhttp x-padding-bytes")
+		}
+		uplinkChunkSize, err := parseSplitHTTPRangeString(config.XHTTPConfig.UplinkChunkSize)
+		if err != nil {
+			return nil, errors.New("invalid xhttp uplink-chunk-size")
+		}
+		scMaxBufferedPosts := 0
+		if config.XHTTPConfig.ScMaxBufferedPosts != "" {
+			scMaxBufferedPosts, err = strconv.Atoi(config.XHTTPConfig.ScMaxBufferedPosts)
+			if err != nil {
+				return nil, errors.New("invalid xhttp sc-max-buffered-posts")
+			}
+		}
 		importSplithttpConfig := &splithttp.SplitHTTPConfig{
-			Path:                config.XHTTPConfig.Path,
-			Host:                config.XHTTPConfig.Host,
-			MaxConcurrentPosts:  100,
-			NoSSEHeader:         config.XHTTPConfig.NoSSEHeader,
-			ScStreamUpServerSec: scStreamUpServerSecs,
-			ScMaxEachPostBytes:  scMaxEachPostBytes,
+			Path:                 config.XHTTPConfig.Path,
+			Host:                 config.XHTTPConfig.Host,
+			Mode:                 config.XHTTPConfig.Mode,
+			MaxConcurrentPosts:   100,
+			XPaddingBytes:        xPaddingBytes,
+			XPaddingObfsMode:     config.XHTTPConfig.XPaddingObfsMode,
+			XPaddingKey:          config.XHTTPConfig.XPaddingKey,
+			XPaddingHeader:       config.XHTTPConfig.XPaddingHeader,
+			XPaddingPlacement:    config.XHTTPConfig.XPaddingPlacement,
+			XPaddingMethod:       config.XHTTPConfig.XPaddingMethod,
+			UplinkHTTPMethod:     config.XHTTPConfig.UplinkHTTPMethod,
+			NoSSEHeader:          config.XHTTPConfig.NoSSEHeader,
+			SessionPlacement:     config.XHTTPConfig.SessionPlacement,
+			SessionKey:           config.XHTTPConfig.SessionKey,
+			SeqPlacement:         config.XHTTPConfig.SeqPlacement,
+			SeqKey:               config.XHTTPConfig.SeqKey,
+			UplinkDataPlacement:  config.XHTTPConfig.UplinkDataPlacement,
+			UplinkDataKey:        config.XHTTPConfig.UplinkDataKey,
+			UplinkChunkSize:      uplinkChunkSize,
+			ScStreamUpServerSec:  scStreamUpServerSecs,
+			ScMaxBufferedPosts:   scMaxBufferedPosts,
+			ScMaxEachPostBytes:   scMaxEachPostBytes,
+			ServerMaxHeaderBytes: config.XHTTPConfig.ServerMaxHeaderBytes,
 		}
 		xhttpPath := importSplithttpConfig.GetNormalizedPath()
 		splithttpServer := splithttp.NewSplitHTTPServer(importSplithttpConfig, func(conn net.Conn) {
@@ -221,11 +253,12 @@ func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 		if !slices.Contains(tlsConfig.NextProtos, "h2") {
 			tlsConfig.NextProtos = append([]string{"h2"}, tlsConfig.NextProtos...)
 		}
+		httpServer.MaxHeaderBytes = importSplithttpConfig.GetNormalizedServerMaxHeaderBytes()
 	}
 	if httpServer.Handler != nil {
 		h2Server := &http.Http2Server{}
-		if realityBuilder != nil {
-			// reality listener is not a standard TLS listener; keep h2c compatibility path.
+		if realityBuilder != nil || tlsConfig.GetCertificate == nil {
+			// XHTTP needs h2c for plain HTTP/2 and for non-standard TLS wrappers like Reality.
 			httpServer.Handler = h2c.NewHandler(httpServer.Handler, h2Server)
 		}
 		if err := http.Http2ConfigureServer(&httpServer, h2Server); err != nil {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/metacubex/mihomo/common/httputils"
 	"github.com/metacubex/mihomo/common/once"
+	"github.com/metacubex/mihomo/component/dialer"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/vmess"
 
@@ -22,11 +22,11 @@ import (
 	"golang.org/x/exp/slices"
 )
 
-type ResolvUDPFunc func(ctx context.Context, server string) (netip.AddrPort, error)
+type DialOptionsFunc func() []dialer.Option
 
 type ClientOptions struct {
 	Dialer                C.Dialer
-	ResolvUDP             ResolvUDPFunc
+	DialOptions           DialOptionsFunc // for quic
 	Server                string
 	Username              string
 	Password              string
@@ -34,6 +34,7 @@ type ClientOptions struct {
 	QUIC                  bool
 	QUICCongestionControl string
 	QUICCwnd              int
+	QUICBBRProfile        string
 	HealthCheck           bool
 	MaxConnections        int
 	MinStreams            int
@@ -43,7 +44,7 @@ type ClientOptions struct {
 type Client struct {
 	ctx              context.Context
 	dialer           C.Dialer
-	resolv           ResolvUDPFunc
+	dialOptions      DialOptionsFunc
 	server           string
 	auth             string
 	roundTripper     http.RoundTripper
@@ -55,11 +56,11 @@ type Client struct {
 
 func NewClient(ctx context.Context, options ClientOptions) (client *Client, err error) {
 	client = &Client{
-		ctx:    ctx,
-		dialer: options.Dialer,
-		resolv: options.ResolvUDP,
-		server: options.Server,
-		auth:   buildAuth(options.Username, options.Password),
+		ctx:         ctx,
+		dialer:      options.Dialer,
+		dialOptions: options.DialOptions,
+		server:      options.Server,
+		auth:        buildAuth(options.Username, options.Password),
 	}
 	if options.QUIC {
 		if len(options.TLSConfig.NextProtos) == 0 {
@@ -67,7 +68,7 @@ func NewClient(ctx context.Context, options ClientOptions) (client *Client, err 
 		} else if !slices.Contains(options.TLSConfig.NextProtos, "h3") {
 			return nil, errors.New("require alpn h3")
 		}
-		err = client.quicRoundTripper(options.TLSConfig, options.QUICCongestionControl, options.QUICCwnd)
+		err = client.quicRoundTripper(options.TLSConfig, options.QUICCongestionControl, options.QUICCwnd, options.QUICBBRProfile)
 		if err != nil {
 			return nil, err
 		}
@@ -154,16 +155,16 @@ func (c *Client) roundTrip(request *http.Request, conn *httpConn) {
 		if err != nil {
 			_ = pipeWriter.CloseWithError(err)
 			_ = pipeReader.CloseWithError(err)
-			conn.setUp(nil, err)
+			conn.setup(nil, err)
 		} else if response.StatusCode != http.StatusOK {
 			_ = response.Body.Close()
 			err = fmt.Errorf("unexpected status code: %d", response.StatusCode)
 			_ = pipeWriter.CloseWithError(err)
 			_ = pipeReader.CloseWithError(err)
-			conn.setUp(nil, err)
+			conn.setup(nil, err)
 		} else {
 			c.resetHealthCheckTimer()
-			conn.setUp(response.Body, nil)
+			conn.setup(response.Body, nil)
 		}
 	}()
 }

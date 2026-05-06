@@ -274,6 +274,9 @@ func (c *packet) Data() []byte {
 // WriteBack wirtes UDP packet with source(ip, port) = `addr`
 func (c *packet) WriteBack(b []byte, addr net.Addr) (n int, err error) {
 	if addr == nil {
+		addr = c.lAddr
+	}
+	if addr == nil {
 		err = errors.New("address is invalid")
 		return
 	}

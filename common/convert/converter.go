@@ -331,15 +331,14 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 				vmess["http-opts"] = httpOpts
 
 			case "h2":
-				headers := make(map[string]any)
 				h2Opts := make(map[string]any)
-				if host, ok := values["host"].(string); ok && host != "" {
-					headers["Host"] = []string{host}
+				h2Opts["path"] = "/"
+				if path, ok := values["path"].(string); ok && path != "" {
+					h2Opts["path"] = path
 				}
-
-				h2Opts["path"] = values["path"]
-				h2Opts["headers"] = headers
-
+				if host, ok := values["host"].(string); ok && host != "" {
+					h2Opts["host"] = []string{host}
+				}
 				vmess["h2-opts"] = h2Opts
 
 			case "ws", "httpupgrade":
@@ -453,10 +452,18 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 						"host": pluginInfo.Get("obfs-host"),
 					}
 				} else if strings.Contains(pluginName, "v2ray-plugin") {
+					mode := pluginInfo.Get("mode")
+					if mode == "" {
+						mode = pluginInfo.Get("obfs")
+					}
+					host := pluginInfo.Get("host")
+					if host == "" {
+						host = pluginInfo.Get("obfs-host")
+					}
 					ss["plugin"] = "v2ray-plugin"
 					ss["plugin-opts"] = map[string]any{
-						"mode": pluginInfo.Get("mode"),
-						"host": pluginInfo.Get("host"),
+						"mode": mode,
+						"host": host,
 						"path": pluginInfo.Get("path"),
 						"tls":  strings.Contains(plugin, "tls"),
 					}
